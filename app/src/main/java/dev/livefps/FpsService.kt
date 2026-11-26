@@ -6,14 +6,19 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
@@ -22,26 +27,57 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 
 /**
- * Foreground service that draws a small draggable FPS box over other apps.
+ * Shared state for in-app UI and outside observers.
+ */
+object FpsState {
+    @Volatile var currentFps: Double? = null
+    @Volatile var currentLabel: String = "-- fps"
+    @Volatile var isRunning: Boolean = false
+
+    // UI listener callback (dispatched on main thread)
+    var listener: ((fps: Double?, label: String) -> Unit)? = null
+}
+
+/**
+ * Foreground service that draws a small draggable FPS box over other apps
+ * and streams real-time FPS data to the in-app UI.
  *
- * FPS source: SurfaceFlinger TimeStats (root). Every interval we read
- * `totalFrames` (frames actually presented to the display) and clear the
- * counter, so frames / elapsed seconds = real on-screen FPS. On an LTPO/VRR
- * panel this drops to 1-3 at idle, matching the developer-options overlay.
+ * FPS source: SurfaceFlinger TimeStats (root). Every configured polling interval
+ * we read `totalFrames` (frames actually presented to the display) and clear
+ * the counter, so frames / elapsed seconds = real on-screen FPS.
+ * On LTPO / VRR displays this drops to 1-3 fps at idle, matching the developer-options overlay.
  */
 class FpsService : Service() {
 
     companion object {
+        const val PREFS_NAME = "livefps_prefs"
+        const val KEY_INTERVAL_MS = "interval_ms"
+        const val DEFAULT_INTERVAL_MS = 1000L
+
         @Volatile var running = false
+        @Volatile var pollingIntervalMs = DEFAULT_INTERVAL_MS
         const val ACTION_STOP = "dev.livefps.STOP"
         private const val CHANNEL = "fps"
-        private const val INTERVAL_MS = 1000L
         private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
+
+        fun updateInterval(context: Context, newIntervalMs: Long) {
+            pollingIntervalMs = newIntervalMs
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_INTERVAL_MS, newIntervalMs)
+                .apply()
+        }
+
+        fun getSavedInterval(context: Context): Long {
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getLong(KEY_INTERVAL_MS, DEFAULT_INTERVAL_MS)
+        }
     }
 
     private lateinit var wm: WindowManager
     private var view: TextView? = null
     private var worker: Thread? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var alive = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -53,8 +89,11 @@ class FpsService : Service() {
         }
         if (running) return START_STICKY
         running = true
+        pollingIntervalMs = getSavedInterval(this)
         startInForeground()
-        addOverlay()
+        if (Settings.canDrawOverlays(this)) {
+            addOverlay()
+        }
         startWorker()
         return START_STICKY
     }
@@ -62,6 +101,12 @@ class FpsService : Service() {
     override fun onDestroy() {
         alive = false
         running = false
+        FpsState.isRunning = false
+        FpsState.currentFps = null
+        FpsState.currentLabel = "-- fps"
+        mainHandler.post {
+            FpsState.listener?.invoke(null, "-- fps")
+        }
         worker?.interrupt()
         view?.let { runCatching { wm.removeView(it) } }
         view = null
@@ -81,6 +126,7 @@ class FpsService : Service() {
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle("LiveFPS running")
+            .setContentText("Monitoring on-screen refresh rate")
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .build()
@@ -99,9 +145,13 @@ class FpsService : Service() {
             text = "-- fps"
             textSize = 13f
             typeface = Typeface.MONOSPACE
-            setTextColor(Color.GREEN)
-            setBackgroundColor(0x99000000.toInt())
-            setPadding((8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt())
+            setTextColor(Color.parseColor("#00E676"))
+            background = GradientDrawable().apply {
+                setColor(0xCC121212.toInt())
+                cornerRadius = 8 * dp
+                setStroke((1 * dp).toInt(), 0x33FFFFFF.toInt())
+            }
+            setPadding((10 * dp).toInt(), (5 * dp).toInt(), (10 * dp).toInt(), (5 * dp).toInt())
         }
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -138,6 +188,7 @@ class FpsService : Service() {
 
     private fun startWorker() {
         alive = true
+        FpsState.isRunning = true
         worker = Thread({
             var proc: Process? = null
             var w: BufferedWriter? = null
@@ -165,7 +216,8 @@ class FpsService : Service() {
                 var last = SystemClock.elapsedRealtimeNanos()
 
                 while (alive) {
-                    Thread.sleep(INTERVAL_MS)
+                    val currentInterval = pollingIntervalMs.coerceAtLeast(100L)
+                    Thread.sleep(currentInterval)
                     val out = sh(
                         "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 totalFrames; " +
                             "dumpsys SurfaceFlinger --timestats -clear >/dev/null 2>&1"
@@ -176,12 +228,26 @@ class FpsService : Service() {
                     val frames = out.firstNotNullOfOrNull {
                         FRAMES_RE.find(it)?.groupValues?.get(1)?.toIntOrNull()
                     }
-                    val label = if (frames == null) "no root" else "%.0f fps".format(frames / secs)
+                    val fpsVal = if (frames != null && secs > 0) frames / secs else null
+                    val label = if (frames == null) "no root" else "%.0f fps".format(fpsVal ?: 0.0)
+
                     view?.post { view?.text = label }
+
+                    FpsState.currentFps = fpsVal
+                    FpsState.currentLabel = label
+                    mainHandler.post {
+                        FpsState.listener?.invoke(fpsVal, label)
+                    }
                 }
             } catch (_: InterruptedException) {
             } catch (e: Exception) {
-                view?.post { view?.text = "no root" }
+                val errLabel = "no root"
+                view?.post { view?.text = errLabel }
+                FpsState.currentFps = null
+                FpsState.currentLabel = errLabel
+                mainHandler.post {
+                    FpsState.listener?.invoke(null, errLabel)
+                }
             } finally {
                 // Leave SurfaceFlinger the way we found it.
                 runCatching {
@@ -190,6 +256,7 @@ class FpsService : Service() {
                     proc?.waitFor()
                 }
                 proc?.destroy()
+                FpsState.isRunning = false
             }
         }, "fps-reader").apply { start() }
     }
