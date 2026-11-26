@@ -237,6 +237,20 @@ class FpsService : Service() {
         }
         savedUserY = lp.y
 
+        val screenWidth: Int
+        val screenHeight: Int
+        if (Build.VERSION.SDK_INT >= 30) {
+            val bounds = wm.currentWindowMetrics.bounds
+            screenWidth = bounds.width()
+            screenHeight = bounds.height()
+        } else {
+            val d = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(d)
+            screenWidth = d.widthPixels
+            screenHeight = d.heightPixels
+        }
+
         // Drag to move with screen boundary and zero-margin freedom
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         tv.setOnTouchListener { v, e ->
@@ -247,8 +261,8 @@ class FpsService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
                     val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
-                    val maxX = dm.widthPixels - width
-                    val maxY = dm.heightPixels - height
+                    val maxX = screenWidth - width
+                    val maxY = screenHeight - height
                     val minY = 0 // Zero forced margin: can sit right flush against or under status bar icons
 
                     val targetX = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX.coerceAtLeast(0))
@@ -270,6 +284,7 @@ class FpsService : Service() {
 
         // Handle notification shade pull-down & dismissal in fullscreen
         tv.setOnApplyWindowInsetsListener { v, insets ->
+            val isLandscapeMode = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
             val statusBarInsets = insets.getInsets(WindowInsets.Type.statusBars())
             val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30) {
                 insets.isVisible(WindowInsets.Type.statusBars())
@@ -279,23 +294,24 @@ class FpsService : Service() {
             val newStatusBarTop = if (isStatusBarVisible) statusBarInsets.top else 0
             currentStatusBarTop = newStatusBarTop
 
-            if (savedUserY < 0) {
-                savedUserY = lp.y
-            }
-
-            if (newStatusBarTop > 0) {
-                // If shade is pulled down and overlaps overlay, shift down temporarily
-                if (savedUserY < newStatusBarTop) {
-                    lp.y = newStatusBarTop
-                    isShadeShifted = true
-                    runCatching { wm.updateViewLayout(v, lp) }
+            if (isLandscapeMode) {
+                if (savedUserY < 0) {
+                    savedUserY = lp.y
                 }
-            } else {
-                // Shade hidden again: restore to user's saved position at the top
-                if (isShadeShifted) {
-                    lp.y = savedUserY
-                    isShadeShifted = false
-                    runCatching { wm.updateViewLayout(v, lp) }
+                if (newStatusBarTop > 0) {
+                    // Fullscreen landscape: shade pulled down, shift down temporarily if overlapping
+                    if (savedUserY < newStatusBarTop) {
+                        lp.y = newStatusBarTop
+                        isShadeShifted = true
+                        runCatching { wm.updateViewLayout(v, lp) }
+                    }
+                } else {
+                    // Fullscreen landscape: shade hidden again, restore saved position
+                    if (isShadeShifted) {
+                        lp.y = savedUserY
+                        isShadeShifted = false
+                        runCatching { wm.updateViewLayout(v, lp) }
+                    }
                 }
             }
             insets

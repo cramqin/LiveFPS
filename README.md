@@ -20,7 +20,7 @@ Tiny root & LSPosed app that shows the **real on-screen FPS** in-app, in a float
 ## How it works
 - **App & Overlay**: Reads SurfaceFlinger TimeStats through `su`:
   `dumpsys SurfaceFlinger --timestats -dump` → `totalFrames`, then `-clear`.
-- **Status Bar Hook**: Injected into `com.android.systemui` via LSPosed. SystemUI runs as `android.uid.system` (UID 1000) with native Android `DUMP` permission, querying SurfaceFlinger TimeStats directly without `su` overhead.
+- **Status Bar Hook**: Injected into `com.android.systemui` via LSPosed. Implements modern LSPosed 2.x API 102 specifications (`META-INF/xposed/module.prop`, `java_init.list`, `scope.list`) alongside legacy `assets/xposed_init`. SystemUI runs as `android.uid.system` (UID 1000) with native Android `DUMP` permission, querying SurfaceFlinger TimeStats directly without `su` overhead.
 - $\text{FPS} = \text{frames presented} \div \text{seconds since last read}$.
 
 ## Requirements

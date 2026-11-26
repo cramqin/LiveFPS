@@ -22,6 +22,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    packaging {
+        resources {
+            merges += listOf("META-INF/xposed/*")
+        }
+    }
 }
 
 dependencies {

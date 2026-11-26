@@ -55,6 +55,8 @@ object StatusBarFpsHook {
     private val leftViews = CopyOnWriteArrayList<TextView>()
     private val rightViews = CopyOnWriteArrayList<TextView>()
     private val clockCache = Collections.synchronizedMap(WeakHashMap<View, WeakReference<TextView>>())
+    @Volatile private var globalClock: WeakReference<TextView>? = null
+    @Volatile private var receiverRegistered = false
 
     @Volatile private var isEnabled = false
     @Volatile private var currentPosition = "right"
@@ -103,29 +105,36 @@ object StatusBarFpsHook {
         XposedBridge.hookAllMethods(appCls, "onCreate", object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 val context = param.thisObject as? Context ?: return
-                val filter = IntentFilter(ACTION_CONFIG_CHANGED)
-                val receiver = object : BroadcastReceiver() {
-                    override fun onReceive(ctx: Context?, intent: Intent?) {
-                        if (intent?.action == ACTION_CONFIG_CHANGED) {
-                            isEnabled = intent.getBooleanExtra("enabled", isEnabled)
-                            currentPosition = intent.getStringExtra("position") ?: currentPosition
-                            XposedBridge.log("[LiveFPS] Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
-                            updateVisibilities()
-                        }
-                    }
-                }
-                runCatching {
-                    if (Build.VERSION.SDK_INT >= 33) {
-                        context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-                    } else {
-                        context.registerReceiver(receiver, filter)
-                    }
-                    XposedBridge.log("[LiveFPS] Registered broadcast receiver for $ACTION_CONFIG_CHANGED")
-                }.onFailure {
-                    XposedBridge.log("[LiveFPS] Failed to register broadcast receiver: $it")
-                }
+                registerReceiverWithContext(context)
             }
         })
+    }
+
+    private fun registerReceiverWithContext(context: Context) {
+        if (receiverRegistered) return
+        val appContext = runCatching { context.applicationContext }.getOrNull() ?: context
+        val filter = IntentFilter(ACTION_CONFIG_CHANGED)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                if (intent?.action == ACTION_CONFIG_CHANGED) {
+                    isEnabled = intent.getBooleanExtra("enabled", isEnabled)
+                    currentPosition = intent.getStringExtra("position") ?: currentPosition
+                    XposedBridge.log("[LiveFPS] Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
+                    updateVisibilities()
+                }
+            }
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                appContext.registerReceiver(receiver, filter)
+            }
+            receiverRegistered = true
+            XposedBridge.log("[LiveFPS] Registered broadcast receiver for $ACTION_CONFIG_CHANGED")
+        }.onFailure {
+            XposedBridge.log("[LiveFPS] Failed to register broadcast receiver: $it")
+        }
     }
 
     private fun updateVisibilities() {
@@ -205,18 +214,22 @@ object StatusBarFpsHook {
         batteryView: View?
     ) {
         val context = rootView?.context ?: clockView?.context ?: startSide?.context ?: return
+        clockView?.let { globalClock = WeakReference(it) }
+        registerReceiverWithContext(context)
         val leftContainer = startSide ?: (clockView?.parent as? ViewGroup)
         val rightContainer = endSide ?: (batteryView?.parent as? ViewGroup)
-        injectIndicators(context, leftContainer, rightContainer, clockView)
+        injectIndicators(context, leftContainer, rightContainer, clockView, batteryView)
     }
 
     private fun injectFromView(root: ViewGroup) {
         val context = root.context
         val res = root.resources
+        registerReceiverWithContext(context)
 
         // Search for Clock
         val clockId = res.getIdentifier("clock", "id", "com.android.systemui")
         val clockView = if (clockId != 0) root.findViewById<TextView>(clockId) else null
+        clockView?.let { globalClock = WeakReference(it) }
 
         // Search for Left container
         val leftField = runCatching { XposedHelpers.getObjectField(root, "mStatusBarLeftContainer") as? ViewGroup }.getOrNull()
@@ -242,16 +255,17 @@ object StatusBarFpsHook {
         val batteryView = if (batteryId != 0) root.findViewById<View>(batteryId) else null
         val rightContainer = sysAreaField ?: rightById ?: (batteryView?.parent as? ViewGroup)
 
-        injectIndicators(context, leftContainer, rightContainer, clockView)
+        injectIndicators(context, leftContainer, rightContainer, clockView, batteryView)
     }
 
     private fun injectIndicators(
         context: Context,
         leftContainer: ViewGroup?,
         rightContainer: ViewGroup?,
-        clockView: TextView?
+        clockView: TextView?,
+        batteryView: View?
     ) {
-        XposedBridge.log("[LiveFPS] injectIndicators: left=$leftContainer, right=$rightContainer, clock=$clockView")
+        XposedBridge.log("[LiveFPS] injectIndicators: left=$leftContainer, right=$rightContainer, clock=$clockView, battery=$batteryView")
 
         if (leftContainer != null && leftContainer.findViewWithTag<View>(TAG_LEFT) == null) {
             val tvLeft = createTextIndicatorView(context).apply { tag = TAG_LEFT }
@@ -269,9 +283,14 @@ object StatusBarFpsHook {
         if (rightContainer != null && rightContainer.findViewWithTag<View>(TAG_RIGHT) == null) {
             val tvRight = createTextIndicatorView(context).apply { tag = TAG_RIGHT }
             rightViews.add(tvRight)
-            rightContainer.addView(tvRight, 0)
+            val index = if (batteryView != null && batteryView.parent === rightContainer) {
+                rightContainer.indexOfChild(batteryView)
+            } else {
+                0
+            }
+            rightContainer.addView(tvRight, index)
             syncColorWithClock(tvRight, clockView)
-            XposedBridge.log("[LiveFPS] Added tvRight at index 0 into $rightContainer")
+            XposedBridge.log("[LiveFPS] Added tvRight at index $index into $rightContainer")
         }
 
         updateVisibilities()
@@ -290,6 +309,7 @@ object StatusBarFpsHook {
                 XposedBridge.hookMethod(m, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val clock = param.thisObject as? TextView ?: return
+                        globalClock = WeakReference(clock)
                         mainHandler.post {
                             for (v in leftViews) syncColorWithClock(v, clock)
                             for (v in rightViews) syncColorWithClock(v, clock)
@@ -303,13 +323,20 @@ object StatusBarFpsHook {
     @SuppressLint("SetTextI18n")
     private fun createTextIndicatorView(context: Context): TextView {
         val dp = context.resources.displayMetrics.density
+        val res = context.resources
+        val styleId = res.getIdentifier("TextAppearance.StatusBar.NetWorkSpeedNumber", "style", "com.android.systemui")
+            .takeIf { it != 0 }
+            ?: res.getIdentifier("TextAppearance.StatusBar.Clock", "style", "com.android.systemui")
+
         return TextView(context).apply {
             text = "--"
+            if (styleId != 0) {
+                runCatching { setTextAppearance(styleId) }
+            }
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_VERTICAL
-            setPadding((4 * dp).toInt(), 0, (4 * dp).toInt(), 0)
+            setPadding((3 * dp).toInt(), 0, (3 * dp).toInt(), 0)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -319,18 +346,30 @@ object StatusBarFpsHook {
     }
 
     private fun syncColorWithClock(iconView: TextView, clockView: TextView?) {
-        val clock = clockView ?: findCachedClock(iconView) ?: return
-        clock.textColors?.let { iconView.setTextColor(it) }
-        iconView.alpha = clock.alpha
+        val clock = clockView
+            ?: globalClock?.get()
+            ?: findCachedClock(iconView)
+        if (clock != null) {
+            globalClock = WeakReference(clock)
+            clock.textColors?.let { iconView.setTextColor(it) }
+            iconView.alpha = clock.alpha
+        } else {
+            iconView.setTextColor(Color.WHITE)
+        }
     }
 
     private fun findCachedClock(iconView: View): TextView? {
-        val container = iconView.parent as? ViewGroup ?: return null
         clockCache[iconView]?.get()?.let { return it }
-        val clockId = container.resources.getIdentifier("clock", "id", "com.android.systemui")
-        val clock = if (clockId != 0) container.findViewById<TextView>(clockId) else null
+        val clockId = iconView.resources.getIdentifier("clock", "id", "com.android.systemui")
+        if (clockId == 0) return null
+        val container = iconView.parent as? ViewGroup
+        var clock = container?.findViewById<TextView>(clockId)
+        if (clock == null) {
+            clock = iconView.rootView?.findViewById<TextView>(clockId)
+        }
         if (clock != null) {
             clockCache[iconView] = WeakReference(clock)
+            globalClock = WeakReference(clock)
         }
         return clock
     }
