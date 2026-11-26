@@ -185,6 +185,13 @@ class FpsService : Service() {
     private fun addOverlay() {
         wm = getSystemService(WindowManager::class.java)
         val dp = resources.displayMetrics.density
+        val dm = resources.displayMetrics
+
+        val statusBarHeight = runCatching {
+            val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+            if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
+        }.getOrDefault((28 * dp).toInt())
+
         val tv = TextView(this).apply {
             text = "-- fps"
             textSize = 13f
@@ -202,15 +209,16 @@ class FpsService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = (16 * dp).toInt()
-            y = (80 * dp).toInt()
+            y = statusBarHeight + (16 * dp).toInt()
         }
 
-        // Drag to move.
+        // Drag to move with screen boundary and status bar clamping.
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         tv.setOnTouchListener { v, e ->
             when (e.action) {
@@ -218,8 +226,14 @@ class FpsService : Service() {
                     startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    lp.x = startX + (e.rawX - touchX).toInt()
-                    lp.y = startY + (e.rawY - touchY).toInt()
+                    val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
+                    val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
+                    val maxX = dm.widthPixels - width
+                    val maxY = dm.heightPixels - height
+                    val minY = statusBarHeight
+
+                    lp.x = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX.coerceAtLeast(0))
+                    lp.y = (startY + (e.rawY - touchY).toInt()).coerceIn(minY, maxY.coerceAtLeast(minY))
                     wm.updateViewLayout(v, lp)
                 }
             }
