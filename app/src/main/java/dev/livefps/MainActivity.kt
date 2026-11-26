@@ -140,17 +140,15 @@ class MainActivity : Activity() {
         // 2. Polling Rate Selector Card
         content.addView(buildPollingRateCard())
 
-        // 3. Status Bar (LSPosed) Independent Card
-        content.addView(buildStatusBarCard())
-
-        // 4. Permission warning banner (if needed for overlay)
+        // 3. Permission warning banner & Floating Overlay Action Card (placed directly below Polling Rate)
         permissionBanner = buildPermissionBanner()
         content.addView(permissionBanner)
-
-        // 5. Floating Overlay Action Card (Start / Stop)
         content.addView(buildActionCard())
 
-        // 6. Info Card
+        // 4. Status Bar (LSPosed) Independent Card
+        content.addView(buildStatusBarCard())
+
+        // 5. Info Card
         content.addView(buildInfoCard())
 
         setContentView(root)
@@ -507,10 +505,9 @@ class MainActivity : Activity() {
             layoutParams = lp
             setOnClickListener {
                 isStatusBarEnabled = !isStatusBarEnabled
-                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(KEY_STATUSBAR_ENABLED, isStatusBarEnabled)
-                    .apply()
+                savePrefsAndWorldReadable {
+                    putBoolean(KEY_STATUSBAR_ENABLED, isStatusBarEnabled)
+                }
                 refreshStatusBarUi()
                 dispatchStatusBarConfig()
             }
@@ -574,12 +571,24 @@ class MainActivity : Activity() {
 
     private fun setPosition(pos: String) {
         statusBarPosition = pos
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_STATUSBAR_POSITION, pos)
-            .apply()
+        savePrefsAndWorldReadable {
+            putString(KEY_STATUSBAR_POSITION, pos)
+        }
         refreshStatusBarUi()
         dispatchStatusBarConfig()
+    }
+
+    private fun savePrefsAndWorldReadable(block: android.content.SharedPreferences.Editor.() -> Unit) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().apply(block).apply()
+        runCatching {
+            val file = java.io.File(applicationInfo.dataDir, "shared_prefs/$PREFS_NAME.xml")
+            if (file.exists()) {
+                file.setReadable(true, false)
+                file.parentFile?.setExecutable(true, false)
+                file.parentFile?.setReadable(true, false)
+            }
+        }
     }
 
     private fun refreshStatusBarUi() {
@@ -616,7 +625,7 @@ class MainActivity : Activity() {
         val intent = Intent(ACTION_CONFIG_CHANGED).apply {
             putExtra("enabled", isStatusBarEnabled)
             putExtra("position", statusBarPosition)
-            putExtra("interval_ms", selectedIntervalMs)
+            putExtra("interval_ms", 2000L) // Fixed 2.0s polling rate for status bar
         }
         sendBroadcast(intent)
     }
@@ -856,7 +865,10 @@ class MainActivity : Activity() {
         } else {
             startForegroundService(svc)
         }
-        actionButton.postDelayed({ refreshUi() }, 300)
+        actionButton.postDelayed({
+            refreshUi()
+            FpsTileService.requestUpdate(this)
+        }, 300)
     }
 
     private fun refreshUi() {

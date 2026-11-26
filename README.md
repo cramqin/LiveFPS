@@ -4,11 +4,16 @@ Tiny root & LSPosed app that shows the **real on-screen FPS** in-app, in a float
 
 ## Features
 - **In-App Real-Time Display**: Live digital FPS readout right inside the app.
-- **Floating Overlay**: Draggable, translucent overlay with strict screen & status bar boundary clamping (cannot be dragged behind the status bar or off-screen).
-- **Status Bar Integration (LSPosed)**: Injects live FPS directly into the status bar (Left near clock or Right near battery). Works across Settings, lockscreen, full-screen games, and apps.
+- **Quick Settings Tile**: One-tap toggle of the LiveFPS floating overlay directly from Android's Control Center / Quick Settings.
+- **Adaptive Floating Overlay**: 
+  - Draggable, translucent overlay with strict screen boundary clamping.
+  - **Portrait**: Sticks right against the bottom edge of the status bar with zero gap/margin.
+  - **Fullscreen / Landscape Rotation**: Can be placed at the very top ($y = 0$) when the status bar is hidden.
+  - **Notification Shade Auto-Offset**: If the notification shade or status bar is swiped down over the overlay, it temporarily shifts downward to prevent overlap, and automatically snaps back to its exact saved position when the shade is dismissed.
+- **Status Bar Integration (LSPosed)**: Injects live FPS directly into the status bar (Left near clock or Right near icons area) with a fixed 2.0s refresh rate (matching HyperCeiler) independent of the overlay polling rate.
 - **Independent Controls**: Floating Overlay and Status Bar operate 100% independently—show both, either, or neither.
 - **System-Privileged Overlay**: Hooks WindowManager in `system_server` so `setHideOverlayWindows(true)` in the Settings app and permission dialogs does not hide the overlay.
-- **Configurable Polling Rate**: Switch between 250ms (4 Hz), 500ms (2 Hz), 1.0s (1 Hz), 2.0s (0.5 Hz), or enter a **custom interval in seconds** (e.g. 1.5s).
+- **Configurable Polling Rate**: Switch between 250ms (4 Hz), 500ms (2 Hz), 1.0s (1 Hz), 2.0s (0.5 Hz), or enter a **custom interval in seconds** (e.g. 1.5s) for the in-app and overlay displays.
 - **Battery Saver**: Automatically pauses polling, halts CPU wakeups, and disables SurfaceFlinger stats whenever the screen turns off (0% drain while locked).
 - **Modern Dark Mode**: Sleek dark aesthetic designed for OLED/AMOLED screens.
 

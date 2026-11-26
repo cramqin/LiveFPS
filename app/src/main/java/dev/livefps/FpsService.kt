@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -23,6 +24,8 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.TextView
 import java.io.BufferedReader
@@ -44,11 +47,15 @@ object FpsState {
  * Foreground service that draws a small draggable FPS box over other apps
  * and streams real-time FPS data to the in-app UI.
  *
- * Battery optimizations:
- * 1. Persistent single `su` shell process avoids costly process forks.
- * 2. Auto-pauses polling and disables SurfaceFlinger TimeStats when the screen turns off.
- * 3. UI text diffing prevents redundant WindowManager layout & draw passes.
- * 4. SurfaceFlinger TimeStats is disabled when stopped, leaving zero kernel overhead.
+ * Positioning & Rotation Features:
+ * 1. Portrait mode: sticks right next to the status bar with 0 gap/margin.
+ * 2. Fullscreen / Landscape rotation: allows positioning at the very top (y = 0)
+ *    when status bar is hidden.
+ * 3. Notification shade auto-offset: when notification shade / status bar is swiped down
+ *    over the overlay, it temporarily shifts down to avoid overlap, and automatically
+ *    restores back to its exact saved top position when the shade is closed.
+ * 4. Screen rotation clamping: preserves boundary bounds across device orientation changes.
+ * 5. Quick Settings Tile synchronization.
  */
 class FpsService : Service() {
 
@@ -59,6 +66,7 @@ class FpsService : Service() {
 
         @Volatile var running = false
         @Volatile var pollingIntervalMs = DEFAULT_INTERVAL_MS
+        const val ACTION_START = "dev.livefps.START"
         const val ACTION_STOP = "dev.livefps.STOP"
         private const val CHANNEL = "fps"
         private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
@@ -86,6 +94,10 @@ class FpsService : Service() {
     private val pauseLock = Object()
     @Volatile private var screenOn = true
     private var receiverRegistered = false
+
+    private var currentStatusBarTop = 0
+    private var savedUserY = -1
+    private var isShadeShifted = false
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -119,6 +131,7 @@ class FpsService : Service() {
         }
         registerScreenReceiver()
         startWorker()
+        FpsTileService.requestUpdate(this)
         return START_STICKY
     }
 
@@ -154,6 +167,7 @@ class FpsService : Service() {
         worker?.interrupt()
         view?.let { runCatching { wm.removeView(it) } }
         view = null
+        FpsTileService.requestUpdate(this)
         super.onDestroy()
     }
 
@@ -184,13 +198,14 @@ class FpsService : Service() {
     @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
     private fun addOverlay() {
         wm = getSystemService(WindowManager::class.java)
-        val dp = resources.displayMetrics.density
         val dm = resources.displayMetrics
+        val dp = dm.density
 
-        val statusBarHeight = runCatching {
-            val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-            if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
-        }.getOrDefault((28 * dp).toInt())
+        val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
+
+        val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        currentStatusBarTop = if (isLandscape) 0 else systemStatusBarHeight
 
         val tv = TextView(this).apply {
             text = "-- fps"
@@ -215,10 +230,12 @@ class FpsService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = (16 * dp).toInt()
-            y = statusBarHeight + (16 * dp).toInt()
+            // Stick right against status bar in portrait; top of screen in landscape
+            y = currentStatusBarTop
         }
+        savedUserY = lp.y
 
-        // Drag to move with screen boundary and status bar clamping.
+        // Drag to move with screen boundary and dynamic status bar clamping
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         tv.setOnTouchListener { v, e ->
             when (e.action) {
@@ -230,18 +247,87 @@ class FpsService : Service() {
                     val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
                     val maxX = dm.widthPixels - width
                     val maxY = dm.heightPixels - height
-                    val minY = statusBarHeight
+                    val minY = currentStatusBarTop
 
-                    lp.x = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX.coerceAtLeast(0))
-                    lp.y = (startY + (e.rawY - touchY).toInt()).coerceIn(minY, maxY.coerceAtLeast(minY))
+                    val targetX = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX.coerceAtLeast(0))
+                    val targetY = (startY + (e.rawY - touchY).toInt()).coerceIn(minY, maxY.coerceAtLeast(minY))
+
+                    lp.x = targetX
+                    lp.y = targetY
+                    savedUserY = targetY
+                    isShadeShifted = false
                     wm.updateViewLayout(v, lp)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    savedUserY = lp.y
+                    isShadeShifted = false
                 }
             }
             true
         }
 
+        // Handle notification shade pull-down & dismissal in fullscreen
+        tv.setOnApplyWindowInsetsListener { v, insets ->
+            val statusBarInsets = insets.getInsets(WindowInsets.Type.statusBars())
+            val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30) {
+                insets.isVisible(WindowInsets.Type.statusBars())
+            } else {
+                statusBarInsets.top > 0
+            }
+            val newStatusBarTop = if (isStatusBarVisible) statusBarInsets.top else 0
+            currentStatusBarTop = newStatusBarTop
+
+            if (savedUserY < 0) {
+                savedUserY = lp.y
+            }
+
+            if (newStatusBarTop > 0) {
+                // If shade is pulled down and overlaps overlay, shift down temporarily
+                if (savedUserY < newStatusBarTop) {
+                    lp.y = newStatusBarTop
+                    isShadeShifted = true
+                    runCatching { wm.updateViewLayout(v, lp) }
+                }
+            } else {
+                // Shade hidden again: restore to user's saved position at the top
+                if (isShadeShifted) {
+                    lp.y = savedUserY
+                    isShadeShifted = false
+                    runCatching { wm.updateViewLayout(v, lp) }
+                }
+            }
+            insets
+        }
+
         wm.addView(tv, lp)
         view = tv
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        view?.let { v ->
+            val dm = resources.displayMetrics
+            val lp = v.layoutParams as? WindowManager.LayoutParams ?: return
+            val width = v.width.takeIf { it > 0 } ?: (60 * dm.density).toInt()
+            val height = v.height.takeIf { it > 0 } ?: (30 * dm.density).toInt()
+            val maxX = (dm.widthPixels - width).coerceAtLeast(0)
+            val maxY = (dm.heightPixels - height).coerceAtLeast(0)
+
+            val isLandscape = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
+            if (isLandscape) {
+                currentStatusBarTop = 0
+            } else {
+                val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+                currentStatusBarTop = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dm.density).toInt()
+            }
+
+            val minY = currentStatusBarTop
+            lp.x = lp.x.coerceIn(0, maxX)
+            lp.y = lp.y.coerceIn(minY, maxY.coerceAtLeast(minY))
+            savedUserY = lp.y
+            isShadeShifted = false
+            runCatching { wm.updateViewLayout(v, lp) }
+        }
     }
 
     private fun startWorker() {
@@ -337,6 +423,7 @@ class FpsService : Service() {
                 }
                 proc?.destroy()
                 FpsState.isRunning = false
+                FpsTileService.requestUpdate(this@FpsService)
             }
         }, "fps-reader").apply { start() }
     }

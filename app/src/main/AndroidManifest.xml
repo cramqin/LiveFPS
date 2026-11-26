@@ -41,5 +41,16 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="On-screen FPS overlay" />
         </service>
+
+        <service
+            android:name=".FpsTileService"
+            android:label="LiveFPS"
+            android:icon="@drawable/ic_qs_fps"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
