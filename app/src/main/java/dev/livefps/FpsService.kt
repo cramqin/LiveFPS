@@ -230,12 +230,14 @@ class FpsService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = (16 * dp).toInt()
-            // Stick right against status bar in portrait; top of screen in landscape
-            y = currentStatusBarTop
+            y = (currentStatusBarTop - 20 * dp).toInt().coerceAtLeast(0)
+            if (Build.VERSION.SDK_INT >= 28) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
         }
         savedUserY = lp.y
 
-        // Drag to move with screen boundary and dynamic status bar clamping
+        // Drag to move with screen boundary and zero-margin freedom
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         tv.setOnTouchListener { v, e ->
             when (e.action) {
@@ -247,7 +249,7 @@ class FpsService : Service() {
                     val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
                     val maxX = dm.widthPixels - width
                     val maxY = dm.heightPixels - height
-                    val minY = currentStatusBarTop
+                    val minY = 0 // Zero forced margin: can sit right flush against or under status bar icons
 
                     val targetX = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX.coerceAtLeast(0))
                     val targetY = (startY + (e.rawY - touchY).toInt()).coerceIn(minY, maxY.coerceAtLeast(minY))
@@ -321,7 +323,7 @@ class FpsService : Service() {
                 currentStatusBarTop = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dm.density).toInt()
             }
 
-            val minY = currentStatusBarTop
+            val minY = 0
             lp.x = lp.x.coerceIn(0, maxX)
             lp.y = lp.y.coerceIn(minY, maxY.coerceAtLeast(minY))
             savedUserY = lp.y

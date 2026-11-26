@@ -33,8 +33,11 @@ import java.util.concurrent.CopyOnWriteArrayList
  * SystemUI Hook:
  * Injects a real-time FPS readout directly into HyperOS/Android Status Bar.
  *
- * Modeled after HyperCeiler's BatteryDetailIndicator:
- * - Left side (near Clock) & Right side (inside system_icon_area) injection points
+ * Modeled after HyperCeiler's status bar injection:
+ * - Hooks PhoneStatusBarViewController (startSideContainer & endSideContainer)
+ * - Hooks MiuiPhoneStatusBarView / PhoneStatusBarView onAttachedToWindow
+ * - Hooks HomeStatusBarViewBinderImpl.bind (HyperOS 2 pipeline)
+ * - Left side (near Clock) & Right side (system icons area / battery)
  * - Uses native UID 1000 (SystemUI) DUMP permission for SurfaceFlinger TimeStats
  * - Battery-friendly: pauses sampling when screen is off (isInteractive)
  * - Fixed default 2.0s (2000ms) polling rate matching HyperCeiler (independent of overlay)
@@ -64,6 +67,7 @@ object StatusBarFpsHook {
 
     fun init(lpparam: XC_LoadPackage.LoadPackageParam) {
         val classLoader = lpparam.classLoader
+        XposedBridge.log("[LiveFPS] StatusBarFpsHook.init in ${lpparam.packageName}")
 
         // 1. Read initial config from XSharedPreferences
         loadInitialPrefs()
@@ -88,6 +92,9 @@ object StatusBarFpsHook {
             xPrefs.reload()
             isEnabled = xPrefs.getBoolean("statusbar_enabled", false)
             currentPosition = xPrefs.getString("statusbar_position", "right") ?: "right"
+            XposedBridge.log("[LiveFPS] Initial prefs: isEnabled=$isEnabled, position=$currentPosition")
+        }.onFailure {
+            XposedBridge.log("[LiveFPS] Failed to load initial prefs: $it")
         }
     }
 
@@ -102,6 +109,7 @@ object StatusBarFpsHook {
                         if (intent?.action == ACTION_CONFIG_CHANGED) {
                             isEnabled = intent.getBooleanExtra("enabled", isEnabled)
                             currentPosition = intent.getStringExtra("position") ?: currentPosition
+                            XposedBridge.log("[LiveFPS] Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
                             updateVisibilities()
                         }
                     }
@@ -112,12 +120,16 @@ object StatusBarFpsHook {
                     } else {
                         context.registerReceiver(receiver, filter)
                     }
+                    XposedBridge.log("[LiveFPS] Registered broadcast receiver for $ACTION_CONFIG_CHANGED")
+                }.onFailure {
+                    XposedBridge.log("[LiveFPS] Failed to register broadcast receiver: $it")
                 }
             }
         })
     }
 
     private fun updateVisibilities() {
+        XposedBridge.log("[LiveFPS] updateVisibilities: isEnabled=$isEnabled, pos=$currentPosition, leftViews=${leftViews.size}, rightViews=${rightViews.size}")
         mainHandler.post {
             for (tv in leftViews) {
                 tv.visibility = if (isEnabled && currentPosition == "left") View.VISIBLE else View.GONE
@@ -129,80 +141,137 @@ object StatusBarFpsHook {
     }
 
     private fun setupStatusBarViews(classLoader: ClassLoader) {
-        // Hook MiuiCollapsedStatusBarFragment / CollapsedStatusBarFragment
-        val fragmentCls = XposedHelpers.findClassIfExists("com.android.systemui.statusbar.phone.MiuiCollapsedStatusBarFragment", classLoader)
-            ?: XposedHelpers.findClassIfExists("com.android.systemui.statusbar.phone.CollapsedStatusBarFragment", classLoader)
-
-        fragmentCls?.let { cls ->
-            val methods = cls.declaredMethods.filter {
-                (it.name == "initMiuiViewsOnViewCreated" || it.name == "onViewCreated") && it.parameterTypes.isNotEmpty()
-            }
-            for (m in methods) {
-                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+        // 1. Hook PhoneStatusBarViewController.onViewAttached
+        val controllerCls = XposedHelpers.findClassIfExists("com.android.systemui.statusbar.phone.PhoneStatusBarViewController", classLoader)
+        if (controllerCls != null) {
+            runCatching {
+                XposedBridge.hookAllMethods(controllerCls, "onViewAttached", object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val root = (param.args.getOrNull(0) as? View)
-                            ?: runCatching { XposedHelpers.callMethod(param.thisObject, "getView") as? View }.getOrNull()
-                            ?: return
-                        injectViews(root)
+                        XposedBridge.log("[LiveFPS] PhoneStatusBarViewController.onViewAttached invoked")
+                        val controller = param.thisObject
+                        val clockView = runCatching { XposedHelpers.getObjectField(controller, "clock") as? TextView }.getOrNull()
+                        val startSide = runCatching { XposedHelpers.getObjectField(controller, "startSideContainer") as? ViewGroup }.getOrNull()
+                        val endSide = runCatching { XposedHelpers.getObjectField(controller, "endSideContainer") as? ViewGroup }.getOrNull()
+                        val batteryView = runCatching { XposedHelpers.getObjectField(controller, "battery") as? View }.getOrNull()
+                        val rootView = runCatching { XposedHelpers.getObjectField(controller, "mView") as? ViewGroup }.getOrNull()
+
+                        injectFromController(rootView, clockView, startSide, endSide, batteryView)
                     }
                 })
-            }
+                XposedBridge.log("[LiveFPS] Hooked PhoneStatusBarViewController.onViewAttached")
+            }.onFailure { XposedBridge.log("[LiveFPS] Hook PhoneStatusBarViewController failed: $it") }
         }
 
-        // Hook MiuiPhoneStatusBarView / PhoneStatusBarView
-        val barViewCls = XposedHelpers.findClassIfExists("com.android.systemui.statusbar.phone.MiuiPhoneStatusBarView", classLoader)
-            ?: XposedHelpers.findClassIfExists("com.android.systemui.statusbar.phone.PhoneStatusBarView", classLoader)
-
-        barViewCls?.let { cls ->
-            val methods = cls.declaredMethods.filter {
-                it.name in listOf("onFinishInflate", "onAttachedToWindow") && it.parameterTypes.isEmpty()
-            }
-            for (m in methods) {
-                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+        // 2. Hook MiuiPhoneStatusBarView / PhoneStatusBarView onAttachedToWindow
+        val barViewNames = listOf(
+            "com.android.systemui.statusbar.phone.MiuiPhoneStatusBarView",
+            "com.android.systemui.statusbar.phone.PhoneStatusBarView"
+        )
+        for (clsName in barViewNames) {
+            val cls = XposedHelpers.findClassIfExists(clsName, classLoader) ?: continue
+            runCatching {
+                XposedBridge.hookAllMethods(cls, "onAttachedToWindow", object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val view = param.thisObject as? ViewGroup ?: return
-                        injectViews(view)
+                        XposedBridge.log("[LiveFPS] $clsName.onAttachedToWindow invoked")
+                        injectFromView(view)
                     }
                 })
-            }
+                XposedBridge.log("[LiveFPS] Hooked $clsName.onAttachedToWindow")
+            }.onFailure { XposedBridge.log("[LiveFPS] Hook $clsName failed: $it") }
+        }
+
+        // 3. Hook HomeStatusBarViewBinderImpl.bind (HyperOS 2)
+        val binderCls = XposedHelpers.findClassIfExists("com.android.systemui.statusbar.pipeline.shared.ui.binder.HomeStatusBarViewBinderImpl", classLoader)
+        if (binderCls != null) {
+            runCatching {
+                XposedBridge.hookAllMethods(binderCls, "bind", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val view = param.args.getOrNull(0) as? ViewGroup ?: return
+                        XposedBridge.log("[LiveFPS] HomeStatusBarViewBinderImpl.bind invoked with ${view.javaClass.name}")
+                        injectFromView(view)
+                    }
+                })
+                XposedBridge.log("[LiveFPS] Hooked HomeStatusBarViewBinderImpl.bind")
+            }.onFailure { XposedBridge.log("[LiveFPS] Hook HomeStatusBarViewBinderImpl failed: $it") }
         }
     }
 
-    private fun injectViews(root: View) {
+    private fun injectFromController(
+        rootView: ViewGroup?,
+        clockView: TextView?,
+        startSide: ViewGroup?,
+        endSide: ViewGroup?,
+        batteryView: View?
+    ) {
+        val context = rootView?.context ?: clockView?.context ?: startSide?.context ?: return
+        val leftContainer = startSide ?: (clockView?.parent as? ViewGroup)
+        val rightContainer = endSide ?: (batteryView?.parent as? ViewGroup)
+        injectIndicators(context, leftContainer, rightContainer, clockView)
+    }
+
+    private fun injectFromView(root: ViewGroup) {
         val context = root.context
         val res = root.resources
 
-        // 1. Left container (near Clock)
+        // Search for Clock
         val clockId = res.getIdentifier("clock", "id", "com.android.systemui")
-        val clockView = if (clockId != 0) root.findViewById<View>(clockId) else null
-        val leftContainer = (clockView?.parent as? ViewGroup) ?: (root as? ViewGroup)
+        val clockView = if (clockId != 0) root.findViewById<TextView>(clockId) else null
+
+        // Search for Left container
+        val leftField = runCatching { XposedHelpers.getObjectField(root, "mStatusBarLeftContainer") as? ViewGroup }.getOrNull()
+        val leftId = res.getIdentifier("start_side_container", "id", "com.android.systemui")
+        val leftById = if (leftId != 0) root.findViewById<ViewGroup>(leftId) else null
+        val leftContainer = leftField ?: leftById ?: (clockView?.parent as? ViewGroup)
+
+        // Search for Right container
+        val sysAreaField = runCatching { XposedHelpers.getObjectField(root, "mSystemIconArea") as? ViewGroup }.getOrNull()
+        val r1 = res.getIdentifier("end_side_container", "id", "com.android.systemui")
+        val r2 = res.getIdentifier("system_icons", "id", "com.android.systemui")
+        val r3 = res.getIdentifier("system_icon_area", "id", "com.android.systemui")
+        val r4 = res.getIdentifier("status_bar_icons", "id", "com.android.systemui")
+        val r5 = res.getIdentifier("statusIcons", "id", "com.android.systemui")
+
+        val rightById = (if (r1 != 0) root.findViewById<ViewGroup>(r1) else null)
+            ?: (if (r2 != 0) root.findViewById<ViewGroup>(r2) else null)
+            ?: (if (r3 != 0) root.findViewById<ViewGroup>(r3) else null)
+            ?: (if (r4 != 0) root.findViewById<ViewGroup>(r4) else null)
+            ?: (if (r5 != 0) root.findViewById<ViewGroup>(r5) else null)
+
+        val batteryId = res.getIdentifier("battery", "id", "com.android.systemui")
+        val batteryView = if (batteryId != 0) root.findViewById<View>(batteryId) else null
+        val rightContainer = sysAreaField ?: rightById ?: (batteryView?.parent as? ViewGroup)
+
+        injectIndicators(context, leftContainer, rightContainer, clockView)
+    }
+
+    private fun injectIndicators(
+        context: Context,
+        leftContainer: ViewGroup?,
+        rightContainer: ViewGroup?,
+        clockView: TextView?
+    ) {
+        XposedBridge.log("[LiveFPS] injectIndicators: left=$leftContainer, right=$rightContainer, clock=$clockView")
 
         if (leftContainer != null && leftContainer.findViewWithTag<View>(TAG_LEFT) == null) {
             val tvLeft = createTextIndicatorView(context).apply { tag = TAG_LEFT }
             leftViews.add(tvLeft)
-            val index = if (clockView != null) {
+            val index = if (clockView != null && clockView.parent === leftContainer) {
                 (leftContainer.indexOfChild(clockView) + 1).coerceIn(0, leftContainer.childCount)
             } else {
                 leftContainer.childCount
             }
             leftContainer.addView(tvLeft, index)
-            syncColorWithClock(tvLeft, clockView as? TextView)
+            syncColorWithClock(tvLeft, clockView)
+            XposedBridge.log("[LiveFPS] Added tvLeft at index $index into $leftContainer")
         }
-
-        // 2. Right container (system_icon_area or statusIcons)
-        val sysIconAreaId = res.getIdentifier("system_icon_area", "id", "com.android.systemui")
-        val sysIconArea = if (sysIconAreaId != 0) root.findViewById<ViewGroup>(sysIconAreaId) else null
-
-        val statusIconsId = res.getIdentifier("statusIcons", "id", "com.android.systemui")
-        val statusIcons = if (statusIconsId != 0) root.findViewById<ViewGroup>(statusIconsId) else null
-
-        val rightContainer = sysIconArea ?: (statusIcons?.parent as? ViewGroup) ?: statusIcons
 
         if (rightContainer != null && rightContainer.findViewWithTag<View>(TAG_RIGHT) == null) {
             val tvRight = createTextIndicatorView(context).apply { tag = TAG_RIGHT }
             rightViews.add(tvRight)
             rightContainer.addView(tvRight, 0)
-            syncColorWithClock(tvRight, clockView as? TextView)
+            syncColorWithClock(tvRight, clockView)
+            XposedBridge.log("[LiveFPS] Added tvRight at index 0 into $rightContainer")
         }
 
         updateVisibilities()
@@ -245,7 +314,7 @@ object StatusBarFpsHook {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            visibility = View.GONE
+            visibility = if (isEnabled) View.VISIBLE else View.GONE
         }
     }
 
