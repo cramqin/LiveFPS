@@ -6,8 +6,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -42,10 +44,11 @@ object FpsState {
  * Foreground service that draws a small draggable FPS box over other apps
  * and streams real-time FPS data to the in-app UI.
  *
- * FPS source: SurfaceFlinger TimeStats (root). Every configured polling interval
- * we read `totalFrames` (frames actually presented to the display) and clear
- * the counter, so frames / elapsed seconds = real on-screen FPS.
- * On LTPO / VRR displays this drops to 1-3 fps at idle, matching the developer-options overlay.
+ * Battery optimizations:
+ * 1. Persistent single `su` shell process avoids costly process forks.
+ * 2. Auto-pauses polling and disables SurfaceFlinger TimeStats when the screen turns off.
+ * 3. UI text diffing prevents redundant WindowManager layout & draw passes.
+ * 4. SurfaceFlinger TimeStats is disabled when stopped, leaving zero kernel overhead.
  */
 class FpsService : Service() {
 
@@ -80,6 +83,26 @@ class FpsService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var alive = false
 
+    private val pauseLock = Object()
+    @Volatile private var screenOn = true
+    private var receiverRegistered = false
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    screenOn = false
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    screenOn = true
+                    synchronized(pauseLock) {
+                        pauseLock.notifyAll()
+                    }
+                }
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,8 +117,20 @@ class FpsService : Service() {
         if (Settings.canDrawOverlays(this)) {
             addOverlay()
         }
+        registerScreenReceiver()
         startWorker()
         return START_STICKY
+    }
+
+    private fun registerScreenReceiver() {
+        if (!receiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+            registerReceiver(screenReceiver, filter)
+            receiverRegistered = true
+        }
     }
 
     override fun onDestroy() {
@@ -106,6 +141,15 @@ class FpsService : Service() {
         FpsState.currentLabel = "-- fps"
         mainHandler.post {
             FpsState.listener?.invoke(null, "-- fps")
+        }
+
+        if (receiverRegistered) {
+            runCatching { unregisterReceiver(screenReceiver) }
+            receiverRegistered = false
+        }
+
+        synchronized(pauseLock) {
+            pauseLock.notifyAll()
         }
         worker?.interrupt()
         view?.let { runCatching { wm.removeView(it) } }
@@ -193,6 +237,7 @@ class FpsService : Service() {
             var proc: Process? = null
             var w: BufferedWriter? = null
             var r: BufferedReader? = null
+            var lastOverlayLabel = ""
 
             fun sh(cmd: String): List<String> {
                 val out = ArrayList<String>()
@@ -216,8 +261,25 @@ class FpsService : Service() {
                 var last = SystemClock.elapsedRealtimeNanos()
 
                 while (alive) {
+                    // Battery Saver: If screen is turned off, pause polling completely
+                    if (!screenOn) {
+                        sh("dumpsys SurfaceFlinger --timestats -disable >/dev/null 2>&1")
+                        synchronized(pauseLock) {
+                            while (!screenOn && alive) {
+                                pauseLock.wait()
+                            }
+                        }
+                        if (!alive) break
+                        // Resumed after screen on: re-enable and reset timestamp
+                        sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
+                        sh("dumpsys SurfaceFlinger --timestats -clear >/dev/null 2>&1")
+                        last = SystemClock.elapsedRealtimeNanos()
+                    }
+
                     val currentInterval = pollingIntervalMs.coerceAtLeast(100L)
                     Thread.sleep(currentInterval)
+                    if (!screenOn || !alive) continue
+
                     val out = sh(
                         "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 totalFrames; " +
                             "dumpsys SurfaceFlinger --timestats -clear >/dev/null 2>&1"
@@ -231,7 +293,11 @@ class FpsService : Service() {
                     val fpsVal = if (frames != null && secs > 0) frames / secs else null
                     val label = if (frames == null) "no root" else "%.0f fps".format(fpsVal ?: 0.0)
 
-                    view?.post { view?.text = label }
+                    // Avoid redundant layout/draw invalidations if text is unchanged
+                    if (label != lastOverlayLabel) {
+                        lastOverlayLabel = label
+                        view?.post { view?.text = label }
+                    }
 
                     FpsState.currentFps = fpsVal
                     FpsState.currentLabel = label
