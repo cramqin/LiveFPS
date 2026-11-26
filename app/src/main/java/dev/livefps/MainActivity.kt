@@ -15,6 +15,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -71,9 +72,41 @@ class MainActivity : Activity() {
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20f), dp(24f), dp(20f), dp(32f))
         }
         root.addView(content)
+
+        fun applyInsets(topInset: Int, bottomInset: Int) {
+            val effectiveTop = if (topInset > 0) topInset else dp(36f)
+            content.setPadding(
+                dp(20f),
+                effectiveTop + dp(16f),
+                dp(20f),
+                bottomInset + dp(28f)
+            )
+        }
+
+        val initialTop = runCatching {
+            windowManager.currentWindowMetrics.windowInsets.getInsets(
+                WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()
+            ).top
+        }.getOrDefault(0)
+
+        val initialBottom = runCatching {
+            windowManager.currentWindowMetrics.windowInsets.getInsets(
+                WindowInsets.Type.navigationBars()
+            ).bottom
+        }.getOrDefault(0)
+
+        applyInsets(initialTop, initialBottom)
+
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val statusBar = insets.getInsets(
+                WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()
+            )
+            val navBar = insets.getInsets(WindowInsets.Type.navigationBars())
+            applyInsets(statusBar.top, navBar.bottom)
+            insets
+        }
 
         // App Header
         content.addView(buildHeader())
