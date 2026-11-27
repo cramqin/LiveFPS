@@ -404,8 +404,8 @@ class FpsService : Service() {
                 r = proc.inputStream.bufferedReader()
 
                 sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
-                sh("dumpsys SurfaceFlinger --timestats -clear >/dev/null 2>&1")
-                var last = SystemClock.elapsedRealtimeNanos()
+                var lastTime = SystemClock.elapsedRealtimeNanos()
+                var lastFrames = -1L
 
                 while (alive) {
                     // Battery Saver: If screen is turned off, pause polling completely
@@ -419,26 +419,31 @@ class FpsService : Service() {
                         if (!alive) break
                         // Resumed after screen on: re-enable and reset timestamp
                         sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
-                        sh("dumpsys SurfaceFlinger --timestats -clear >/dev/null 2>&1")
-                        last = SystemClock.elapsedRealtimeNanos()
+                        lastTime = SystemClock.elapsedRealtimeNanos()
+                        lastFrames = -1L
                     }
 
                     val currentInterval = pollingIntervalMs.coerceAtLeast(100L)
                     Thread.sleep(currentInterval)
                     if (!screenOn || !alive) continue
 
-                    val out = sh(
-                        "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 totalFrames; " +
-                            "dumpsys SurfaceFlinger --timestats -clear >/dev/null 2>&1"
-                    )
+                    val out = sh("dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 totalFrames")
                     val now = SystemClock.elapsedRealtimeNanos()
-                    val secs = (now - last) / 1e9
-                    last = now
-                    val frames = out.firstNotNullOfOrNull {
-                        FRAMES_RE.find(it)?.groupValues?.get(1)?.toIntOrNull()
+                    val secs = (now - lastTime) / 1e9
+                    lastTime = now
+                    val currentFrames = out.firstNotNullOfOrNull {
+                        FRAMES_RE.find(it)?.groupValues?.get(1)?.toLongOrNull()
                     }
-                    val fpsVal = if (frames != null && secs > 0) frames / secs else null
-                    val label = if (frames == null) "no root" else "%.0f fps".format(fpsVal ?: 0.0)
+                    val fpsVal = if (currentFrames != null && lastFrames >= 0 && secs > 0) {
+                        val deltaFrames = (currentFrames - lastFrames).coerceAtLeast(0)
+                        deltaFrames / secs
+                    } else null
+
+                    if (currentFrames != null) {
+                        lastFrames = currentFrames
+                    }
+
+                    val label = if (currentFrames == null) "no root" else "%.0f fps".format(fpsVal ?: 0.0)
 
                     // Avoid redundant layout/draw invalidations if text is unchanged
                     if (label != lastOverlayLabel) {
