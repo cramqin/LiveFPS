@@ -128,7 +128,7 @@ class FpsService : Service() {
             insets.getInsets(WindowInsets.Type.statusBars()).top
         } else 0
 
-        val statusBarHeight = if (insetsTop > 0) insetsTop else systemStatusBarHeight
+        val statusBarHeight = systemStatusBarHeight // fixed: window-relative insetsTop varies with overlay position (feedback loop)
 
         val bounds = if (Build.VERSION.SDK_INT >= 30) {
             wm.currentWindowMetrics.bounds
@@ -145,7 +145,7 @@ class FpsService : Service() {
 
         val portraitMinY = (statusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
         val minY = if (isLandscape) {
-            if (isStatusBarVisible) statusBarHeight else 0
+            if (isStatusBarVisible) statusBarHeight - (4 * dp).toInt() else 0
         } else {
             portraitMinY
         }
@@ -293,7 +293,7 @@ class FpsService : Service() {
             wm.currentWindowMetrics.windowInsets.isVisible(WindowInsets.Type.statusBars())
         } else true
         val initialMinY = if (isLandscape) {
-            if (isStatusBarVisible) systemStatusBarHeight else 0
+            if (isStatusBarVisible) systemStatusBarHeight - (4 * dp).toInt() else 0
         } else {
             portraitMinY
         }
@@ -369,12 +369,12 @@ class FpsService : Service() {
                     val insetsTop = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
                         insets.getInsets(WindowInsets.Type.statusBars()).top
                     } else 0
-                    val currentStatusBarH = if (insetsTop > 0) insetsTop else systemStatusBarHeight
+                    val currentStatusBarH = systemStatusBarHeight
                     val currentSnugMargin = (currentStatusBarH - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
 
                     val isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
                     val minY = if (isLandscapeNow) {
-                        if (isStatusBarVisibleNow) currentStatusBarH else 0
+                        if (isStatusBarVisibleNow) currentStatusBarH - (4 * dp).toInt() else 0
                     } else {
                         currentSnugMargin
                     }
