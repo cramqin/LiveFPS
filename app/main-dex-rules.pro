@@ -1,2 +1,2 @@
--keep class dev.livefps.hook.** { *; }
+-keep class com.cramqin.hyperfps.hook.** { *; }
 -keep class io.github.libxposed.** { *; }

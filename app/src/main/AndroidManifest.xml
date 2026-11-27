@@ -7,8 +7,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:icon="@android:drawable/ic_menu_view"
-        android:label="LiveFPS"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="HyperFPS"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
         <meta-data
@@ -36,7 +37,7 @@
 
         <service
             android:name=".FpsTileService"
-            android:label="LiveFPS"
+            android:label="HyperFPS"
             android:icon="@drawable/ic_qs_fps"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">

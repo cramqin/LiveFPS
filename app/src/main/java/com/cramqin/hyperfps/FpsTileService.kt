@@ -1,4 +1,4 @@
-package dev.livefps
+package com.cramqin.hyperfps
 
 import android.app.PendingIntent
 import android.content.ComponentName
@@ -13,7 +13,7 @@ import android.service.quicksettings.TileService
 import android.widget.Toast
 
 /**
- * Quick Settings Tile allowing one-tap toggle of the LiveFPS floating overlay
+ * Quick Settings Tile allowing one-tap toggle of the HyperFPS floating overlay
  * from the Android notification shade / control center.
  */
 class FpsTileService : TileService() {
@@ -31,7 +31,7 @@ class FpsTileService : TileService() {
             updateTileState(false)
         } else {
             if (!Settings.canDrawOverlays(this)) {
-                Toast.makeText(this, "LiveFPS: Overlay permission required", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "HyperFPS: Overlay permission required", Toast.LENGTH_LONG).show()
                 val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
@@ -58,7 +58,7 @@ class FpsTileService : TileService() {
         val tile = qsTile ?: return
         val isRunning = overrideRunning ?: FpsState.isRunning
         tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = "LiveFPS"
+        tile.label = "HyperFPS"
         tile.icon = Icon.createWithResource(this, R.drawable.ic_qs_fps)
         if (Build.VERSION.SDK_INT >= 29) {
             tile.subtitle = if (isRunning) FpsState.currentLabel else "Off"

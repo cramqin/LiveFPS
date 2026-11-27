@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Tachometer speed track - muted base -->
+    <path
+        android:strokeColor="#1C2E38"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M 33.5,69.5 A 26,26 0 1,1 74.5,69.5" />
+
+    <!-- Tachometer active speed arc - Electric Neon Green -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:pathData="M 33.5,69.5 A 26,26 0 1,1 74.5,69.5" />
+
+    <!-- Calibration graduation ticks -->
+    <!-- 60 FPS tick (bottom left) -->
+    <path
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 29,56 L 33,55" />
+
+    <!-- 90 FPS tick (mid left) -->
+    <path
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 35,39 L 39,41" />
+
+    <!-- 120 FPS tick (top left) -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 45,28 L 47,33" />
+
+    <!-- Peak Center tick -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M 54,23 L 54,28" />
+
+    <!-- 144 FPS peak tick (top right) -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 63,28 L 61,33" />
+
+    <!-- Overdrive tick (mid right) -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 73,39 L 69,41" />
+
+    <!-- Bottom right tick -->
+    <path
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 79,56 L 75,55" />
+
+    <!-- Stylized "H" - Left Pillar (Electric Cyan) -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M 39,40 L 44,40 L 42,66 L 37,66 Z" />
+
+    <!-- Stylized "H" - Right Pillar (Electric Cyan) -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M 66,40 L 71,40 L 69,66 L 64,66 Z" />
+
+    <!-- Pulse telemetry crossbar connecting the H pillars (Neon Green) -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 42.5,53 L 48,53 L 51,47 L 54,58 L 57,53 L 65.5,53" />
+
+    <!-- Tachometer Speedometer Needle pointing at 144Hz zone (Pure White) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 52.5,56.5 L 53.5,51.5 L 68,33 L 66,40 L 55.5,57.5 Z" />
+
+    <!-- Needle glowing tip highlight (Neon Green) -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M 68,33 L 71.5,30.5 L 69,35.5 Z" />
+
+    <!-- Center Tachometer Hub (White circle) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 54,52 A 3,3 0 1,1 53.9,52 Z" />
+
+    <!-- Lower Speed Chevrons (Dual telemetry motion indicators) -->
+    <path
+        android:strokeColor="#00E676"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 48,72 L 54,76 L 60,72" />
+    <path
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 50,77 L 54,80 L 58,77" />
+</vector>

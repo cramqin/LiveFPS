@@ -4,15 +4,29 @@ plugins {
 }
 
 android {
-    namespace = "dev.livefps"
+    namespace = "com.cramqin.hyperfps"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.livefps"
+        applicationId = "com.cramqin.hyperfps"
         minSdk = 30
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 100
+        versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystoreFile = rootProject.file("hyperfps.jks")
+            if (keystoreFile.exists()) {
+                storeFile = keystoreFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "hyperfps123"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "hyperfps"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "hyperfps123"
+            } else {
+                initWith(getByName("debug"))
+            }
+        }
     }
 
     compileOptions {
@@ -25,6 +39,11 @@ android {
 
     buildTypes {
         debug {
+            multiDexKeepProguard = file("main-dex-rules.pro")
+        }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             multiDexKeepProguard = file("main-dex-rules.pro")
         }
     }

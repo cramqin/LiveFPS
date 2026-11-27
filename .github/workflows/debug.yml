@@ -26,5 +26,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LiveFPS-debug
+          name: HyperFPS-debug
           path: app/build/outputs/apk/debug/*.apk

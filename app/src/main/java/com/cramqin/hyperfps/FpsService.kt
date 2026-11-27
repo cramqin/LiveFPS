@@ -1,4 +1,4 @@
-package dev.livefps
+package com.cramqin.hyperfps
 
 import android.annotation.SuppressLint
 import android.app.Notification
@@ -62,16 +62,17 @@ object FpsState {
 class FpsService : Service() {
 
     companion object {
-        const val PREFS_NAME = "livefps_prefs"
+        const val PREFS_NAME = "hyperfps_prefs"
         const val KEY_INTERVAL_MS = "interval_ms"
         const val DEFAULT_INTERVAL_MS = 2000L
-        const val ACTION_FPS_UPDATE = "dev.livefps.ACTION_FPS_UPDATE"
-        const val ACTION_STATUSBAR_ACK = "dev.livefps.ACTION_STATUSBAR_ACK"
+        const val ACTION_FPS_UPDATE = "com.cramqin.hyperfps.ACTION_FPS_UPDATE"
+        const val ACTION_STATUSBAR_ACK = "com.cramqin.hyperfps.ACTION_STATUSBAR_ACK"
+        const val ACTION_OVERLAY_CONFIG_CHANGED = "com.cramqin.hyperfps.ACTION_OVERLAY_CONFIG_CHANGED"
 
         @Volatile var running = false
         @Volatile var pollingIntervalMs = DEFAULT_INTERVAL_MS
-        const val ACTION_START = "dev.livefps.START"
-        const val ACTION_STOP = "dev.livefps.STOP"
+        const val ACTION_START = "com.cramqin.hyperfps.START"
+        const val ACTION_STOP = "com.cramqin.hyperfps.STOP"
         private const val CHANNEL = "fps"
         private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
 
@@ -186,6 +187,9 @@ class FpsService : Service() {
                         lastStatusBarAckTime = SystemClock.elapsedRealtime()
                     }
                 }
+                ACTION_OVERLAY_CONFIG_CHANGED -> {
+                    mainHandler.post { applyOverlayAppearance() }
+                }
             }
         }
     }
@@ -216,6 +220,7 @@ class FpsService : Service() {
                 addAction(Intent.ACTION_SCREEN_OFF)
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(ACTION_STATUSBAR_ACK)
+                addAction(ACTION_OVERLAY_CONFIG_CHANGED)
             }
             if (Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(screenReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -224,6 +229,73 @@ class FpsService : Service() {
             }
             receiverRegistered = true
         }
+    }
+
+    private fun applyOverlayAppearance() {
+        val tv = view ?: return
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val dm = resources.displayMetrics
+        val dp = dm.density
+
+        val font = prefs.getString("overlay_font", "mono") ?: "mono"
+        val customFontPath = prefs.getString("overlay_custom_font_path", "") ?: ""
+        val isBold = prefs.getBoolean("overlay_bold", true)
+        val fontSize = prefs.getFloat("overlay_font_size", 13f)
+        val colorHex = prefs.getString("overlay_color", "#00E676") ?: "#00E676"
+        val bgStyle = prefs.getString("overlay_bg_style", "semi_dark") ?: "semi_dark"
+        val shape = prefs.getString("overlay_shape", "rounded") ?: "rounded"
+        val paddingStyle = prefs.getString("overlay_padding", "normal") ?: "normal"
+
+        tv.textSize = fontSize
+        val baseTypeface = if (font == "custom" && customFontPath.isNotBlank()) {
+            runCatching {
+                val f = java.io.File(customFontPath)
+                if (f.exists() && f.canRead()) Typeface.createFromFile(f) else null
+            }.getOrNull() ?: Typeface.MONOSPACE
+        } else {
+            when (font) {
+                "sans", "sans_bold", "sans-serif" -> Typeface.SANS_SERIF
+                "serif" -> Typeface.SERIF
+                "default" -> Typeface.DEFAULT
+                else -> Typeface.MONOSPACE
+            }
+        }
+        tv.typeface = Typeface.create(baseTypeface, if (isBold) Typeface.BOLD else Typeface.NORMAL)
+        val textColor = runCatching { Color.parseColor(colorHex) }.getOrDefault(Color.parseColor("#00E676"))
+        tv.setTextColor(textColor)
+
+        val bgColor = when (bgStyle) {
+            "solid" -> 0xFF121212.toInt()
+            "translucent" -> 0x66121212.toInt()
+            "transparent" -> 0x00000000
+            else -> 0xCC121212.toInt()
+        }
+
+        val cornerRadius = when (shape) {
+            "pill" -> 999f * dp
+            "soft" -> 4f * dp
+            "rect" -> 0f
+            else -> 8f * dp
+        }
+
+        val (padH, padV) = when (paddingStyle) {
+            "compact" -> Pair(6f, 2f)
+            "relaxed" -> Pair(14f, 7f)
+            else -> Pair(10f, 5f)
+        }
+
+        if (bgStyle == "transparent") {
+            tv.background = null
+            tv.setShadowLayer(6f, 2f, 2f, Color.BLACK)
+        } else {
+            tv.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            tv.background = GradientDrawable().apply {
+                setColor(bgColor)
+                this.cornerRadius = cornerRadius
+                setStroke((1 * dp).toInt(), 0x33FFFFFF.toInt())
+            }
+        }
+        tv.setPadding((padH * dp).toInt(), (padV * dp).toInt(), (padH * dp).toInt(), (padV * dp).toInt())
     }
 
     override fun onDestroy() {
@@ -263,8 +335,8 @@ class FpsService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         val n = Notification.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("LiveFPS running")
+            .setSmallIcon(R.drawable.ic_qs_fps)
+            .setContentTitle("HyperFPS running")
             .setContentText("Monitoring on-screen refresh rate")
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
@@ -308,16 +380,9 @@ class FpsService : Service() {
 
         val tv = TextView(this).apply {
             text = "-- fps"
-            textSize = 13f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#00E676"))
-            background = GradientDrawable().apply {
-                setColor(0xCC121212.toInt())
-                cornerRadius = 8 * dp
-                setStroke((1 * dp).toInt(), 0x33FFFFFF.toInt())
-            }
-            setPadding((10 * dp).toInt(), (5 * dp).toInt(), (10 * dp).toInt(), (5 * dp).toInt())
         }
+        view = tv
+        applyOverlayAppearance()
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,

@@ -1,4 +1,4 @@
-package dev.livefps.hook
+package com.cramqin.hyperfps.hook
 
 import android.util.Log
 import io.github.libxposed.api.XposedModule
@@ -20,16 +20,16 @@ object SystemServerHook {
                     m.invoke(thisObj) as? String
                 }.getOrNull()
 
-                if (owningPkg == "dev.livefps") {
-                    Log.d("LiveFPS", "Treating dev.livefps window as system overlay")
+                if (owningPkg == "com.cramqin.hyperfps") {
+                    Log.d("HyperFPS", "Treating com.cramqin.hyperfps window as system overlay")
                     false
                 } else {
                     chain.proceed()
                 }
             }
-            Log.i("LiveFPS", "SystemServerHook: successfully hooked isNonSystemOverlayWindow")
+            Log.i("HyperFPS", "SystemServerHook: successfully hooked isNonSystemOverlayWindow")
         }.onFailure {
-            Log.e("LiveFPS", "SystemServerHook: failed to hook isNonSystemOverlayWindow", it)
+            Log.e("HyperFPS", "SystemServerHook: failed to hook isNonSystemOverlayWindow", it)
         }
     }
 }
