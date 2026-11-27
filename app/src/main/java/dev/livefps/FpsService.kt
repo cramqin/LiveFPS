@@ -223,7 +223,6 @@ class FpsService : Service() {
         val portraitMinY = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
 
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        currentStatusBarTop = if (isLandscape) 0 else systemStatusBarHeight
 
         if (userPortraitY < 0) userPortraitY = portraitMinY
         if (userLandscapeY < 0) userLandscapeY = 0
