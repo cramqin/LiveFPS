@@ -225,15 +225,29 @@ object StatusBarFpsHook {
             }
         }
 
-        // setVisibleState -> keep number text visible when state != 2
+        // isBlocked -> false for our own views
+        for (m in nsvCls.declaredMethods.filter { it.name == "isBlocked" && it.parameterTypes.isEmpty() }) {
+            hookMethod(module, m) { chain ->
+                val nsView = chain.thisObject as? View
+                if (nsView?.tag == TAG_LEFT || nsView?.tag == TAG_RIGHT) {
+                    false
+                } else {
+                    chain.proceed()
+                }
+            }
+        }
+
+        // setVisibleState -> keep view and number visible when active
         for (m in nsvCls.declaredMethods.filter { it.name == "setVisibleState" }) {
             hookMethod(module, m) { chain ->
                 val nsView = chain.thisObject as? View
                 if (nsView?.tag == TAG_LEFT || nsView?.tag == TAG_RIGHT) {
-                    val state = chain.args.getOrNull(0) as? Int ?: 0
-                    val visible = state != 2
+                    val isCurrentSide = (nsView.tag == TAG_LEFT && currentPosition == "left") ||
+                                        (nsView.tag == TAG_RIGHT && currentPosition == "right")
+                    val show = isEnabled && isCurrentSide
                     val number = (getField(nsView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (nsView as? TextView)
-                    number?.visibility = if (visible) View.VISIBLE else View.GONE
+                    number?.visibility = if (show) View.VISIBLE else View.GONE
+                    nsView.visibility = if (show) View.VISIBLE else View.GONE
                     null
                 } else {
                     chain.proceed()
@@ -669,8 +683,8 @@ object StatusBarFpsHook {
 
     private fun updateVisibilities() {
         mainHandler.post {
-            leftViews.removeAll { !it.isAttachedToWindow }
-            rightViews.removeAll { !it.isAttachedToWindow }
+            leftViews.removeAll { it.parent == null }
+            rightViews.removeAll { it.parent == null }
 
             for (tv in leftViews) {
                 val show = isEnabled && currentPosition == "left"
@@ -679,6 +693,8 @@ object StatusBarFpsHook {
                 }.onFailure {
                     tv.visibility = if (show) View.VISIBLE else View.GONE
                 }
+                val num = (getField(tv, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (tv as? TextView)
+                num?.visibility = if (show) View.VISIBLE else View.GONE
             }
             for (tv in rightViews) {
                 val show = isEnabled && currentPosition == "right"
@@ -687,6 +703,8 @@ object StatusBarFpsHook {
                 }.onFailure {
                     tv.visibility = if (show) View.VISIBLE else View.GONE
                 }
+                val num = (getField(tv, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (tv as? TextView)
+                num?.visibility = if (show) View.VISIBLE else View.GONE
             }
         }
     }
@@ -694,11 +712,17 @@ object StatusBarFpsHook {
     private fun updateFpsText(fpsText: String) {
         val activeList = if (currentPosition == "left") leftViews else rightViews
         for (tv in activeList) {
+            if (tv.parent == null) continue
             runCatching {
                 callMethod(tv, METHOD_SET_NETWORK_SPEED, fpsText, "")
             }.onFailure {
                 val num = (getField(tv, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (tv as? TextView)
                 num?.text = fpsText
+            }
+            if (isEnabled) {
+                tv.visibility = View.VISIBLE
+                val num = (getField(tv, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (tv as? TextView)
+                num?.visibility = View.VISIBLE
             }
             applyStyleToView(tv)
             syncColorWithClock(tv, null)
