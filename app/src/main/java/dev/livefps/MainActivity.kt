@@ -97,10 +97,28 @@ class MainActivity : Activity() {
         statusBarMarginRight = prefs.getInt(KEY_STATUSBAR_MARGIN_RIGHT, 3)
         statusBarVerticalOffset = prefs.getInt(KEY_STATUSBAR_VERTICAL_OFFSET, 0)
 
-        val root = ScrollView(this).apply {
-            isFillViewport = true
+        val windowLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#121212"))
         }
+
+        val statusBarScrim = View(this).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0)
+        }
+        windowLayout.addView(statusBarScrim)
+
+        val root = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            setBackgroundColor(Color.parseColor("#121212"))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        windowLayout.addView(root)
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -109,9 +127,10 @@ class MainActivity : Activity() {
 
         fun applyInsets(topInset: Int, bottomInset: Int) {
             val effectiveTop = if (topInset > 0) topInset else dp(36f)
+            statusBarScrim.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, effectiveTop)
             content.setPadding(
                 dp(20f),
-                effectiveTop + dp(16f),
+                dp(12f),
                 dp(20f),
                 bottomInset + dp(28f)
             )
@@ -131,7 +150,7 @@ class MainActivity : Activity() {
 
         applyInsets(initialTop, initialBottom)
 
-        root.setOnApplyWindowInsetsListener { _, insets ->
+        windowLayout.setOnApplyWindowInsetsListener { _, insets ->
             val statusBar = insets.getInsets(
                 WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()
             )
@@ -157,7 +176,7 @@ class MainActivity : Activity() {
         // 5. Info Card
         content.addView(buildInfoCard())
 
-        setContentView(root)
+        setContentView(windowLayout)
 
         dispatchStatusBarConfig()
 
@@ -446,22 +465,56 @@ class MainActivity : Activity() {
         posRow.addView(posRightBtn)
         card.addView(posRow)
 
-        // Customization Section Header
-        val customSectionTitle = TextView(this).apply {
-            text = "APPEARANCE & PLACEMENT (LIKE HYPERCEILER)"
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.08f
-            setTextColor(Color.parseColor("#8E8E93"))
+        // Customization Section Header with Reset
+        val customSectionHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
             lp.topMargin = dp(16f)
             lp.bottomMargin = dp(6f)
             layoutParams = lp
         }
-        card.addView(customSectionTitle)
+
+        val customSectionTitle = TextView(this).apply {
+            text = "APPEARANCE & PLACEMENT"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.08f
+            setTextColor(Color.parseColor("#8E8E93"))
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = lp
+        }
+        customSectionHeader.addView(customSectionTitle)
+
+        val resetBtn = TextView(this).apply {
+            text = "RESET"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.06f
+            setTextColor(Color.parseColor("#00E676"))
+            setPadding(dp(8f), dp(4f), dp(4f), dp(4f))
+            setOnClickListener {
+                statusBarFontSize = 11f
+                statusBarBold = true
+                statusBarMarginLeft = 3
+                statusBarMarginRight = 3
+                statusBarVerticalOffset = 0
+                savePrefsAndWorldReadable {
+                    putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize)
+                    putBoolean(KEY_STATUSBAR_BOLD, statusBarBold)
+                    putInt(KEY_STATUSBAR_MARGIN_LEFT, statusBarMarginLeft)
+                    putInt(KEY_STATUSBAR_MARGIN_RIGHT, statusBarMarginRight)
+                    putInt(KEY_STATUSBAR_VERTICAL_OFFSET, statusBarVerticalOffset)
+                }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        }
+        customSectionHeader.addView(resetBtn)
+        card.addView(customSectionHeader)
 
         val customBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

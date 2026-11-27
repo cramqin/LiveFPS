@@ -564,17 +564,20 @@ object StatusBarFpsHook {
     private fun applyStyleToView(iconView: View) {
         val number = (getField(iconView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (iconView as? TextView)
         val density = iconView.resources?.displayMetrics?.density ?: 2.75f
+        val leftPx = (statusBarMarginLeft * density).toInt()
+        val rightPx = (statusBarMarginRight * density).toInt()
 
         if (number != null) {
             number.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, statusBarFontSize)
             number.typeface = if (statusBarBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             number.translationY = statusBarVerticalOffset * density
+            number.setPaddingRelative(leftPx, 0, rightPx, 0)
         }
+
+        iconView.setPaddingRelative(leftPx, 0, rightPx, 0)
 
         val lp = iconView.layoutParams as? ViewGroup.MarginLayoutParams
         if (lp != null) {
-            val leftPx = (statusBarMarginLeft * density).toInt()
-            val rightPx = (statusBarMarginRight * density).toInt()
             if (lp.leftMargin != leftPx || lp.rightMargin != rightPx) {
                 lp.leftMargin = leftPx
                 lp.rightMargin = rightPx
