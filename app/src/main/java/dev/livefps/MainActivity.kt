@@ -60,8 +60,8 @@ class MainActivity : Activity() {
     private var statusBarPosition = "right"
     private var statusBarFontSize = 11f
     private var statusBarBold = true
-    private var statusBarMarginLeft = 3
-    private var statusBarMarginRight = 3
+    private var statusBarMarginLeft = 1
+    private var statusBarMarginRight = 1
     private var statusBarVerticalOffset = 0
 
     private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
@@ -93,8 +93,8 @@ class MainActivity : Activity() {
         statusBarPosition = prefs.getString(KEY_STATUSBAR_POSITION, "right") ?: "right"
         statusBarFontSize = prefs.getFloat(KEY_STATUSBAR_FONT_SIZE, 11f)
         statusBarBold = prefs.getBoolean(KEY_STATUSBAR_BOLD, true)
-        statusBarMarginLeft = prefs.getInt(KEY_STATUSBAR_MARGIN_LEFT, 3)
-        statusBarMarginRight = prefs.getInt(KEY_STATUSBAR_MARGIN_RIGHT, 3)
+        statusBarMarginLeft = prefs.getInt(KEY_STATUSBAR_MARGIN_LEFT, 1)
+        statusBarMarginRight = prefs.getInt(KEY_STATUSBAR_MARGIN_RIGHT, 1)
         statusBarVerticalOffset = prefs.getInt(KEY_STATUSBAR_VERTICAL_OFFSET, 0)
 
         val windowLayout = LinearLayout(this).apply {
@@ -499,8 +499,8 @@ class MainActivity : Activity() {
             setOnClickListener {
                 statusBarFontSize = 11f
                 statusBarBold = true
-                statusBarMarginLeft = 3
-                statusBarMarginRight = 3
+                statusBarMarginLeft = 1
+                statusBarMarginRight = 1
                 statusBarVerticalOffset = 0
                 savePrefsAndWorldReadable {
                     putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize)

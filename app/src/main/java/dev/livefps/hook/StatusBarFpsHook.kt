@@ -82,8 +82,8 @@ object StatusBarFpsHook {
     @Volatile private var currentPosition = "right"
     @Volatile private var statusBarFontSize = 11f
     @Volatile private var statusBarBold = true
-    @Volatile private var statusBarMarginLeft = 3
-    @Volatile private var statusBarMarginRight = 3
+    @Volatile private var statusBarMarginLeft = 1
+    @Volatile private var statusBarMarginRight = 1
     @Volatile private var statusBarVerticalOffset = 0
 
     private var workerThread: HandlerThread? = null
@@ -134,8 +134,8 @@ object StatusBarFpsHook {
                 currentPosition = remotePrefs.getString("statusbar_position", "right") ?: "right"
                 statusBarFontSize = remotePrefs.getFloat("statusbar_font_size", 11f)
                 statusBarBold = remotePrefs.getBoolean("statusbar_bold", true)
-                statusBarMarginLeft = remotePrefs.getInt("statusbar_margin_left", 3)
-                statusBarMarginRight = remotePrefs.getInt("statusbar_margin_right", 3)
+                statusBarMarginLeft = remotePrefs.getInt("statusbar_margin_left", 1)
+                statusBarMarginRight = remotePrefs.getInt("statusbar_margin_right", 1)
                 statusBarVerticalOffset = remotePrefs.getInt("statusbar_vertical_offset", 0)
                 if (isEnabled) lastTimestatsEnableTime = 0L
                 Log.i(TAG, "Loaded remote prefs: isEnabled=$isEnabled, pos=$currentPosition, size=$statusBarFontSize, bold=$statusBarBold")
