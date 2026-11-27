@@ -14,6 +14,7 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -208,6 +209,8 @@ class FpsService : Service() {
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         currentStatusBarTop = if (isLandscape) 0 else systemStatusBarHeight
 
+        val initialMinY = if (isLandscape && currentStatusBarTop == 0) 0 else systemStatusBarHeight
+
         val tv = TextView(this).apply {
             text = "-- fps"
             textSize = 13f
@@ -231,28 +234,14 @@ class FpsService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = (16 * dp).toInt()
-            y = (currentStatusBarTop - 20 * dp).toInt().coerceAtLeast(0)
+            y = initialMinY
             if (Build.VERSION.SDK_INT >= 28) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             }
         }
         savedUserY = lp.y
 
-        val screenWidth: Int
-        val screenHeight: Int
-        if (Build.VERSION.SDK_INT >= 30) {
-            val bounds = wm.currentWindowMetrics.bounds
-            screenWidth = bounds.width()
-            screenHeight = bounds.height()
-        } else {
-            val d = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            wm.defaultDisplay.getRealMetrics(d)
-            screenWidth = d.widthPixels
-            screenHeight = d.heightPixels
-        }
-
-        // Drag to move with screen boundary and zero-margin freedom
+        // Drag to move with dynamic screen boundary and strict status bar collision
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         tv.setOnTouchListener { v, e ->
             when (e.action) {
@@ -262,12 +251,29 @@ class FpsService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
                     val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
-                    val maxX = screenWidth - width
-                    val maxY = screenHeight - height
-                    val minY = 0 // Zero forced margin: can sit right flush against or under status bar icons
 
-                    val targetX = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX.coerceAtLeast(0))
-                    val targetY = (startY + (e.rawY - touchY).toInt()).coerceIn(minY, maxY.coerceAtLeast(minY))
+                    val bounds = if (Build.VERSION.SDK_INT >= 30) {
+                        wm.currentWindowMetrics.bounds
+                    } else {
+                        val d = DisplayMetrics()
+                        @Suppress("DEPRECATION")
+                        wm.defaultDisplay.getRealMetrics(d)
+                        Rect(0, 0, d.widthPixels, d.heightPixels)
+                    }
+                    val screenW = bounds.width()
+                    val screenH = bounds.height()
+
+                    val isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                    val isStatusBarHidden = isLandscapeNow && currentStatusBarTop == 0
+
+                    // Fullscreen landscape: can go all the way to top (minY = 0)
+                    // Portrait or non-fullscreen: sits right flush below status bar (never behind it)
+                    val minY = if (isStatusBarHidden) 0 else (currentStatusBarTop.takeIf { it > 0 } ?: systemStatusBarHeight)
+                    val maxX = (screenW - width).coerceAtLeast(0)
+                    val maxY = (screenH - height).coerceAtLeast(minY)
+
+                    val targetX = (startX + (e.rawX - touchX).toInt()).coerceIn(0, maxX)
+                    val targetY = (startY + (e.rawY - touchY).toInt()).coerceIn(minY, maxY)
 
                     lp.x = targetX
                     lp.y = targetY
@@ -314,6 +320,14 @@ class FpsService : Service() {
                         runCatching { wm.updateViewLayout(v, lp) }
                     }
                 }
+            } else {
+                // Portrait mode: ensure it never slips behind the status bar
+                val barHeight = newStatusBarTop.takeIf { it > 0 } ?: systemStatusBarHeight
+                if (lp.y < barHeight) {
+                    lp.y = barHeight
+                    savedUserY = barHeight
+                    runCatching { wm.updateViewLayout(v, lp) }
+                }
             }
             insets
         }
@@ -329,20 +343,34 @@ class FpsService : Service() {
             val lp = v.layoutParams as? WindowManager.LayoutParams ?: return
             val width = v.width.takeIf { it > 0 } ?: (60 * dm.density).toInt()
             val height = v.height.takeIf { it > 0 } ?: (30 * dm.density).toInt()
-            val maxX = (dm.widthPixels - width).coerceAtLeast(0)
-            val maxY = (dm.heightPixels - height).coerceAtLeast(0)
+            val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+            val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dm.density).toInt()
+
+            val bounds = if (Build.VERSION.SDK_INT >= 30) {
+                wm.currentWindowMetrics.bounds
+            } else {
+                val d = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(d)
+                Rect(0, 0, d.widthPixels, d.heightPixels)
+            }
+            val screenWidth = bounds.width()
+            val screenHeight = bounds.height()
 
             val isLandscape = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
             if (isLandscape) {
                 currentStatusBarTop = 0
             } else {
-                val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-                currentStatusBarTop = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dm.density).toInt()
+                currentStatusBarTop = systemStatusBarHeight
             }
 
-            val minY = 0
+            val isStatusBarHidden = isLandscape && currentStatusBarTop == 0
+            val minY = if (isStatusBarHidden) 0 else currentStatusBarTop
+            val maxX = (screenWidth - width).coerceAtLeast(0)
+            val maxY = (screenHeight - height).coerceAtLeast(minY)
+
             lp.x = lp.x.coerceIn(0, maxX)
-            lp.y = lp.y.coerceIn(minY, maxY.coerceAtLeast(minY))
+            lp.y = lp.y.coerceIn(minY, maxY)
             savedUserY = lp.y
             isShadeShifted = false
             runCatching { wm.updateViewLayout(v, lp) }

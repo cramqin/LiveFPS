@@ -1,33 +1,35 @@
 package dev.livefps.hook
 
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import android.util.Log
+import io.github.libxposed.api.XposedModule
 
-/**
- * System Server (package "android") hooks:
- * Treats LiveFPS's window as a system privileged window so tapjacking protection
- * (setHideOverlayWindows in Settings app, permission dialogs, package installer)
- * does NOT hide the overlay.
- */
 object SystemServerHook {
-    fun init(lpparam: XC_LoadPackage.LoadPackageParam) {
+    fun init(module: XposedModule, classLoader: ClassLoader) {
         val windowStateCls = runCatching {
-            XposedHelpers.findClass("com.android.server.wm.WindowState", lpparam.classLoader)
+            Class.forName("com.android.server.wm.WindowState", false, classLoader)
         }.getOrNull() ?: return
 
         runCatching {
-            XposedBridge.hookAllMethods(windowStateCls, "isNonSystemOverlayWindow", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val owningPackage = runCatching {
-                        XposedHelpers.callMethod(param.thisObject, "getOwningPackage") as? String
-                    }.getOrNull()
-                    if (owningPackage == "dev.livefps") {
-                        param.result = false
-                    }
+            val method = windowStateCls.getDeclaredMethod("isNonSystemOverlayWindow")
+            method.isAccessible = true
+            module.hook(method).intercept { chain ->
+                val thisObj = chain.thisObject
+                val owningPkg = runCatching {
+                    val m = thisObj.javaClass.getMethod("getOwningPackage")
+                    m.isAccessible = true
+                    m.invoke(thisObj) as? String
+                }.getOrNull()
+
+                if (owningPkg == "dev.livefps") {
+                    Log.d("LiveFPS", "Treating dev.livefps window as system overlay")
+                    false
+                } else {
+                    chain.proceed()
                 }
-            })
+            }
+            Log.i("LiveFPS", "SystemServerHook: successfully hooked isNonSystemOverlayWindow")
+        }.onFailure {
+            Log.e("LiveFPS", "SystemServerHook: failed to hook isNonSystemOverlayWindow", it)
         }
     }
 }
