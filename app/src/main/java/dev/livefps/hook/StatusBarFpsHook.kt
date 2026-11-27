@@ -80,6 +80,11 @@ object StatusBarFpsHook {
 
     @Volatile private var isEnabled = false
     @Volatile private var currentPosition = "right"
+    @Volatile private var statusBarFontSize = 11f
+    @Volatile private var statusBarBold = true
+    @Volatile private var statusBarMarginLeft = 3
+    @Volatile private var statusBarMarginRight = 3
+    @Volatile private var statusBarVerticalOffset = 0
 
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
@@ -127,8 +132,13 @@ object StatusBarFpsHook {
             if (remotePrefs != null) {
                 isEnabled = remotePrefs.getBoolean("statusbar_enabled", false)
                 currentPosition = remotePrefs.getString("statusbar_position", "right") ?: "right"
+                statusBarFontSize = remotePrefs.getFloat("statusbar_font_size", 11f)
+                statusBarBold = remotePrefs.getBoolean("statusbar_bold", true)
+                statusBarMarginLeft = remotePrefs.getInt("statusbar_margin_left", 3)
+                statusBarMarginRight = remotePrefs.getInt("statusbar_margin_right", 3)
+                statusBarVerticalOffset = remotePrefs.getInt("statusbar_vertical_offset", 0)
                 if (isEnabled) lastTimestatsEnableTime = 0L
-                Log.i(TAG, "Loaded remote prefs: isEnabled=$isEnabled, pos=$currentPosition")
+                Log.i(TAG, "Loaded remote prefs: isEnabled=$isEnabled, pos=$currentPosition, size=$statusBarFontSize, bold=$statusBarBold")
             }
         }.onFailure {
             Log.w(TAG, "Could not load remote prefs: ${it.message}")
@@ -160,10 +170,16 @@ object StatusBarFpsHook {
                         val prevEnabled = isEnabled
                         isEnabled = intent.getBooleanExtra("enabled", isEnabled)
                         currentPosition = intent.getStringExtra("position") ?: currentPosition
+                        statusBarFontSize = intent.getFloatExtra("font_size", statusBarFontSize)
+                        statusBarBold = intent.getBooleanExtra("bold", statusBarBold)
+                        statusBarMarginLeft = intent.getIntExtra("margin_left", statusBarMarginLeft)
+                        statusBarMarginRight = intent.getIntExtra("margin_right", statusBarMarginRight)
+                        statusBarVerticalOffset = intent.getIntExtra("vertical_offset", statusBarVerticalOffset)
                         if (isEnabled && !prevEnabled) {
                             lastTimestatsEnableTime = 0L
                         }
-                        Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
+                        Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition, size=$statusBarFontSize, bold=$statusBarBold")
+                        applyStyleAndLayout()
                         updateVisibilities()
                     }
                     ACTION_FPS_UPDATE -> {
@@ -173,6 +189,11 @@ object StatusBarFpsHook {
                             if (isEnabled) {
                                 mainHandler.post { updateFpsText(fps) }
                             }
+                            val ackIntent = Intent("dev.livefps.ACTION_STATUSBAR_ACK").apply {
+                                setPackage("dev.livefps")
+                                putExtra("fps", fps)
+                            }
+                            runCatching { ctx?.sendBroadcast(ackIntent) }
                         }
                     }
                 }
@@ -513,14 +534,40 @@ object StatusBarFpsHook {
         if (styleId != 0) {
             runCatching { number.setTextAppearance(styleId) }
         }
-        number.typeface = Typeface.DEFAULT_BOLD
-        number.alpha = 1.0f
-        number.setTextColor(Color.WHITE)
+        applyStyleToView(iconView)
         syncColorWithClock(iconView)
-        val dp = res.displayMetrics.density
-        number.setPaddingRelative((3 * dp).toInt(), 0, (3 * dp).toInt(), 0)
 
         return iconView
+    }
+
+    private fun applyStyleAndLayout() {
+        mainHandler.post {
+            for (v in leftViews) applyStyleToView(v)
+            for (v in rightViews) applyStyleToView(v)
+        }
+    }
+
+    private fun applyStyleToView(iconView: View) {
+        val number = (getField(iconView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (iconView as? TextView)
+        val density = iconView.resources?.displayMetrics?.density ?: 2.75f
+
+        if (number != null) {
+            number.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, statusBarFontSize)
+            number.typeface = if (statusBarBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            number.translationY = statusBarVerticalOffset * density
+        }
+
+        val lp = iconView.layoutParams as? ViewGroup.MarginLayoutParams
+        if (lp != null) {
+            val leftPx = (statusBarMarginLeft * density).toInt()
+            val rightPx = (statusBarMarginRight * density).toInt()
+            if (lp.leftMargin != leftPx || lp.rightMargin != rightPx) {
+                lp.leftMargin = leftPx
+                lp.rightMargin = rightPx
+                iconView.layoutParams = lp
+            }
+        }
+        iconView.requestLayout()
     }
 
     private fun setupClockColorSync(module: XposedModule, classLoader: ClassLoader) {
@@ -556,7 +603,7 @@ object StatusBarFpsHook {
         val clock = clockView ?: findCachedClock(iconView)
         val number = (getField(iconView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (iconView as? TextView)
         if (number != null) {
-            number.typeface = Typeface.DEFAULT_BOLD
+            number.typeface = if (statusBarBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             if (clock != null) {
                 val colors = clock.textColors
                 if (colors != null) {
@@ -653,6 +700,7 @@ object StatusBarFpsHook {
                 val num = (getField(tv, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (tv as? TextView)
                 num?.text = fpsText
             }
+            applyStyleToView(tv)
             syncColorWithClock(tv, null)
         }
     }

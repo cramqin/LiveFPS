@@ -32,6 +32,11 @@ class MainActivity : Activity() {
         const val PREFS_NAME = "livefps_prefs"
         const val KEY_STATUSBAR_ENABLED = "statusbar_enabled"
         const val KEY_STATUSBAR_POSITION = "statusbar_position"
+        const val KEY_STATUSBAR_FONT_SIZE = "statusbar_font_size"
+        const val KEY_STATUSBAR_BOLD = "statusbar_bold"
+        const val KEY_STATUSBAR_MARGIN_LEFT = "statusbar_margin_left"
+        const val KEY_STATUSBAR_MARGIN_RIGHT = "statusbar_margin_right"
+        const val KEY_STATUSBAR_VERTICAL_OFFSET = "statusbar_vertical_offset"
         const val ACTION_CONFIG_CHANGED = "dev.livefps.ACTION_CONFIG_CHANGED"
     }
 
@@ -45,8 +50,19 @@ class MainActivity : Activity() {
     private lateinit var posLeftBtn: TextView
     private lateinit var posRightBtn: TextView
 
+    private lateinit var fontSizeValView: TextView
+    private lateinit var boldToggleBtn: TextView
+    private lateinit var marginLeftValView: TextView
+    private lateinit var marginRightValView: TextView
+    private lateinit var vertOffsetValView: TextView
+
     private var isStatusBarEnabled = false
     private var statusBarPosition = "right"
+    private var statusBarFontSize = 11f
+    private var statusBarBold = true
+    private var statusBarMarginLeft = 3
+    private var statusBarMarginRight = 3
+    private var statusBarVerticalOffset = 0
 
     private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -75,6 +91,11 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         isStatusBarEnabled = prefs.getBoolean(KEY_STATUSBAR_ENABLED, false)
         statusBarPosition = prefs.getString(KEY_STATUSBAR_POSITION, "right") ?: "right"
+        statusBarFontSize = prefs.getFloat(KEY_STATUSBAR_FONT_SIZE, 11f)
+        statusBarBold = prefs.getBoolean(KEY_STATUSBAR_BOLD, true)
+        statusBarMarginLeft = prefs.getInt(KEY_STATUSBAR_MARGIN_LEFT, 3)
+        statusBarMarginRight = prefs.getInt(KEY_STATUSBAR_MARGIN_RIGHT, 3)
+        statusBarVerticalOffset = prefs.getInt(KEY_STATUSBAR_VERTICAL_OFFSET, 0)
 
         val root = ScrollView(this).apply {
             isFillViewport = true
@@ -423,11 +444,249 @@ class MainActivity : Activity() {
             setOnClickListener { setPosition("right") }
         }
         posRow.addView(posRightBtn)
-
         card.addView(posRow)
+
+        // Customization Section Header
+        val customSectionTitle = TextView(this).apply {
+            text = "APPEARANCE & PLACEMENT (LIKE HYPERCEILER)"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.08f
+            setTextColor(Color.parseColor("#8E8E93"))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = dp(16f)
+            lp.bottomMargin = dp(6f)
+            layoutParams = lp
+        }
+        card.addView(customSectionTitle)
+
+        val customBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBox(Color.parseColor("#141416"), 12f, Color.parseColor("#262629"), 1f)
+            setPadding(dp(12f), dp(8f), dp(12f), dp(8f))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            layoutParams = lp
+        }
+
+        // 1. Font Size
+        val (fontSizeRow, fontSizeVal) = buildStepperRow("Font Size", {
+            if (statusBarFontSize > 8f) {
+                statusBarFontSize -= 1f
+                savePrefsAndWorldReadable { putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        }, {
+            if (statusBarFontSize < 24f) {
+                statusBarFontSize += 1f
+                savePrefsAndWorldReadable { putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        })
+        fontSizeValView = fontSizeVal
+        customBox.addView(fontSizeRow)
+
+        // 2. Bold Toggle
+        val (boldRow, boldBtn) = buildBoldToggleRow()
+        boldToggleBtn = boldBtn
+        customBox.addView(boldRow)
+
+        // 3. Margin Left
+        val (marginLeftRow, marginLeftVal) = buildStepperRow("Left Margin", {
+            if (statusBarMarginLeft > -10) {
+                statusBarMarginLeft -= 1
+                savePrefsAndWorldReadable { putInt(KEY_STATUSBAR_MARGIN_LEFT, statusBarMarginLeft) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        }, {
+            if (statusBarMarginLeft < 30) {
+                statusBarMarginLeft += 1
+                savePrefsAndWorldReadable { putInt(KEY_STATUSBAR_MARGIN_LEFT, statusBarMarginLeft) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        })
+        marginLeftValView = marginLeftVal
+        customBox.addView(marginLeftRow)
+
+        // 4. Margin Right
+        val (marginRightRow, marginRightVal) = buildStepperRow("Right Margin", {
+            if (statusBarMarginRight > -10) {
+                statusBarMarginRight -= 1
+                savePrefsAndWorldReadable { putInt(KEY_STATUSBAR_MARGIN_RIGHT, statusBarMarginRight) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        }, {
+            if (statusBarMarginRight < 30) {
+                statusBarMarginRight += 1
+                savePrefsAndWorldReadable { putInt(KEY_STATUSBAR_MARGIN_RIGHT, statusBarMarginRight) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        })
+        marginRightValView = marginRightVal
+        customBox.addView(marginRightRow)
+
+        // 5. Vertical Offset
+        val (vertOffsetRow, vertOffsetVal) = buildStepperRow("Vertical Offset", {
+            if (statusBarVerticalOffset > -15) {
+                statusBarVerticalOffset -= 1
+                savePrefsAndWorldReadable { putInt(KEY_STATUSBAR_VERTICAL_OFFSET, statusBarVerticalOffset) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        }, {
+            if (statusBarVerticalOffset < 15) {
+                statusBarVerticalOffset += 1
+                savePrefsAndWorldReadable { putInt(KEY_STATUSBAR_VERTICAL_OFFSET, statusBarVerticalOffset) }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        })
+        vertOffsetValView = vertOffsetVal
+        customBox.addView(vertOffsetRow)
+
+        card.addView(customBox)
+
         refreshStatusBarUi()
+        refreshAppearanceUi()
 
         return card
+    }
+
+    private fun buildStepperRow(
+        title: String,
+        onDec: () -> Unit,
+        onInc: () -> Unit
+    ): Pair<View, TextView> {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4f), 0, dp(4f))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            layoutParams = lp
+        }
+
+        val label = TextView(this).apply {
+            text = title
+            textSize = 12f
+            setTextColor(Color.parseColor("#E0E0E0"))
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = lp
+        }
+        row.addView(label)
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val decBtn = TextView(this).apply {
+            text = "－"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = roundedBox(Color.parseColor("#2C2C2E"), 8f, Color.parseColor("#3A3A3C"), 1f)
+            setPadding(dp(10f), dp(4f), dp(10f), dp(4f))
+            setOnClickListener { onDec() }
+        }
+        controls.addView(decBtn)
+
+        val valView = TextView(this).apply {
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#00E676"))
+            val lp = LinearLayout.LayoutParams(dp(56f), ViewGroup.LayoutParams.WRAP_CONTENT)
+            layoutParams = lp
+        }
+        controls.addView(valView)
+
+        val incBtn = TextView(this).apply {
+            text = "＋"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = roundedBox(Color.parseColor("#2C2C2E"), 8f, Color.parseColor("#3A3A3C"), 1f)
+            setPadding(dp(10f), dp(4f), dp(10f), dp(4f))
+            setOnClickListener { onInc() }
+        }
+        controls.addView(incBtn)
+
+        row.addView(controls)
+        return Pair(row, valView)
+    }
+
+    private fun buildBoldToggleRow(): Pair<View, TextView> {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4f), 0, dp(4f))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            layoutParams = lp
+        }
+
+        val label = TextView(this).apply {
+            text = "Font Weight"
+            textSize = 12f
+            setTextColor(Color.parseColor("#E0E0E0"))
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = lp
+        }
+        row.addView(label)
+
+        val btn = TextView(this).apply {
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setPadding(dp(14f), dp(5f), dp(14f), dp(5f))
+            setOnClickListener {
+                statusBarBold = !statusBarBold
+                savePrefsAndWorldReadable {
+                    putBoolean(KEY_STATUSBAR_BOLD, statusBarBold)
+                }
+                refreshAppearanceUi()
+                dispatchStatusBarConfig()
+            }
+        }
+        row.addView(btn)
+        return Pair(row, btn)
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun refreshAppearanceUi() {
+        if (!::fontSizeValView.isInitialized) return
+        fontSizeValView.text = "%.0f sp".format(statusBarFontSize)
+        if (statusBarBold) {
+            boldToggleBtn.text = "BOLD"
+            boldToggleBtn.background = roundedBox(Color.parseColor("#00E676"), 8f)
+            boldToggleBtn.setTextColor(Color.parseColor("#121212"))
+            boldToggleBtn.typeface = Typeface.DEFAULT_BOLD
+        } else {
+            boldToggleBtn.text = "NORMAL"
+            boldToggleBtn.background = roundedBox(Color.parseColor("#2C2C2E"), 8f, Color.parseColor("#38383A"), 1f)
+            boldToggleBtn.setTextColor(Color.parseColor("#CCCCCC"))
+            boldToggleBtn.typeface = Typeface.DEFAULT
+        }
+        marginLeftValView.text = "${statusBarMarginLeft} dp"
+        marginRightValView.text = "${statusBarMarginRight} dp"
+        vertOffsetValView.text = if (statusBarVerticalOffset > 0) "+${statusBarVerticalOffset} dp" else "${statusBarVerticalOffset} dp"
     }
 
     private fun setPosition(pos: String) {
@@ -487,6 +746,11 @@ class MainActivity : Activity() {
             putExtra("enabled", isStatusBarEnabled)
             putExtra("position", statusBarPosition)
             putExtra("interval_ms", 2000L) // Fixed 2.0s polling rate for status bar
+            putExtra("font_size", statusBarFontSize)
+            putExtra("bold", statusBarBold)
+            putExtra("margin_left", statusBarMarginLeft)
+            putExtra("margin_right", statusBarMarginRight)
+            putExtra("vertical_offset", statusBarVerticalOffset)
         }
         sendBroadcast(intent)
     }

@@ -66,6 +66,7 @@ class FpsService : Service() {
         const val KEY_INTERVAL_MS = "interval_ms"
         const val DEFAULT_INTERVAL_MS = 2000L
         const val ACTION_FPS_UPDATE = "dev.livefps.ACTION_FPS_UPDATE"
+        const val ACTION_STATUSBAR_ACK = "dev.livefps.ACTION_STATUSBAR_ACK"
 
         @Volatile var running = false
         @Volatile var pollingIntervalMs = DEFAULT_INTERVAL_MS
@@ -97,6 +98,9 @@ class FpsService : Service() {
     @Volatile private var screenOn = true
     private var receiverRegistered = false
 
+    @Volatile private var lastStatusBarAckFps: String? = null
+    @Volatile private var lastStatusBarAckTime = 0L
+
     private var currentStatusBarTop = 0
     private var savedUserY = -1
     private var isShadeShifted = false
@@ -111,6 +115,13 @@ class FpsService : Service() {
                     screenOn = true
                     synchronized(pauseLock) {
                         pauseLock.notifyAll()
+                    }
+                }
+                ACTION_STATUSBAR_ACK -> {
+                    val ackFps = intent.getStringExtra("fps")
+                    if (!ackFps.isNullOrEmpty()) {
+                        lastStatusBarAckFps = ackFps
+                        lastStatusBarAckTime = SystemClock.elapsedRealtime()
                     }
                 }
             }
@@ -142,8 +153,13 @@ class FpsService : Service() {
             val filter = IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_OFF)
                 addAction(Intent.ACTION_SCREEN_ON)
+                addAction(ACTION_STATUSBAR_ACK)
             }
-            registerReceiver(screenReceiver, filter)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(screenReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(screenReceiver, filter)
+            }
             receiverRegistered = true
         }
     }
@@ -458,9 +474,25 @@ class FpsService : Service() {
 
                     if (currentFrames != null && fpsVal != null) {
                         val syncIntent = Intent(ACTION_FPS_UPDATE).apply {
+                            setPackage("com.android.systemui")
                             putExtra("fps", fpsStr)
                         }
                         sendBroadcast(syncIntent)
+
+                        // Lightweight self-check: verify status bar acknowledged identical reading.
+                        // If mismatched or lagging, re-dispatch immediate resync.
+                        val nowMs = SystemClock.elapsedRealtime()
+                        if (lastStatusBarAckFps != null && lastStatusBarAckFps != fpsStr && nowMs - lastStatusBarAckTime < 3500L) {
+                            mainHandler.postDelayed({
+                                if (alive) {
+                                    val resync = Intent(ACTION_FPS_UPDATE).apply {
+                                        setPackage("com.android.systemui")
+                                        putExtra("fps", fpsStr)
+                                    }
+                                    sendBroadcast(resync)
+                                }
+                            }, 120)
+                        }
                     }
                 }
             } catch (_: InterruptedException) {
