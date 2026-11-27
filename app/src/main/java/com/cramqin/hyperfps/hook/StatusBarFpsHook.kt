@@ -252,10 +252,8 @@ object StatusBarFpsHook {
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
                         val rootView = leftContainer?.rootView ?: endSide?.rootView
-                        val batteryId = context.resources.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
-                        val batteryView = if (batteryId != 0) rootView?.findViewById<View>(batteryId) else null
-                        val rightContainer = (batteryView?.parent as? ViewGroup) ?: endSide
-                        injectToRightContainer(rightViews, context, rightContainer)
+                        val (rightContainer, anchorChild) = resolveRightTarget(rootView, context, endSide)
+                        injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
                 }
@@ -279,10 +277,8 @@ object StatusBarFpsHook {
                         val leftContainer = clockView?.parent as? ViewGroup
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
-                        val batteryId = resIds.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
-                        val batteryView = if (batteryId != 0 && rootView != null) rootView.findViewById<View>(batteryId) else null
-                        val rightContainer = batteryView?.parent as? ViewGroup
-                        injectToRightContainer(rightViews, context, rightContainer)
+                        val (rightContainer, anchorChild) = resolveRightTarget(rootView, context, null)
+                        injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
                 }
@@ -305,15 +301,45 @@ object StatusBarFpsHook {
                         val leftContainer = clockView?.parent as? ViewGroup
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
-                        val batteryId = resIds.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
-                        val batteryView = if (batteryId != 0) view.findViewById<View>(batteryId) else null
-                        val rightContainer = batteryView?.parent as? ViewGroup
-                        injectToRightContainer(rightViews, context, rightContainer)
+                        val (rightContainer, anchorChild) = resolveRightTarget(view, context, null)
+                        injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
                 }
             }
         }
+    }
+
+    private fun resolveRightTarget(
+        rootView: View?,
+        context: Context,
+        fallbackEndSide: ViewGroup?
+    ): Pair<ViewGroup?, View?> {
+        val res = context.resources
+        // 1. Prefer status_icons_container (AlphaOptimizedLinearLayout) with system_icon_area as anchor
+        val statusIconsContainerId = res.getIdentifier("status_icons_container", "id", PKG_SYSTEMUI)
+        val systemIconAreaId = res.getIdentifier("system_icon_area", "id", PKG_SYSTEMUI)
+        val statusIconsContainer = if (statusIconsContainerId != 0) rootView?.findViewById<ViewGroup>(statusIconsContainerId) else null
+        val systemIconArea = if (systemIconAreaId != 0) rootView?.findViewById<View>(systemIconAreaId) else null
+        if (statusIconsContainer != null) {
+            return Pair(statusIconsContainer, systemIconArea)
+        }
+
+        // 2. Fallback via battery view: walk above MiuiStatusBatteryContainer into its LinearLayout parent
+        val batteryId = res.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
+        val batteryView = if (batteryId != 0) rootView?.findViewById<View>(batteryId) else null
+        val batteryParent = batteryView?.parent as? ViewGroup
+        if (batteryParent != null) {
+            if (batteryParent.javaClass.simpleName.contains("BatteryContainer") || batteryParent !is LinearLayout) {
+                val grandParent = batteryParent.parent as? ViewGroup
+                if (grandParent != null) {
+                    return Pair(grandParent, batteryParent)
+                }
+            }
+            return Pair(batteryParent, batteryView)
+        }
+
+        return Pair(fallbackEndSide, null)
     }
 
     private fun injectToLeftContainer(
@@ -348,7 +374,8 @@ object StatusBarFpsHook {
     private fun injectToRightContainer(
         targetList: CopyOnWriteArrayList<View>,
         context: Context,
-        targetContainer: ViewGroup?
+        targetContainer: ViewGroup?,
+        anchorChild: View?
     ) {
         val container = targetContainer ?: return
         val existing = container.findViewWithTag<View>(TAG_RIGHT)
@@ -361,10 +388,15 @@ object StatusBarFpsHook {
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
         val fpsView = createFpsTextView(context, lp).apply { tag = TAG_RIGHT }
 
-        container.addView(fpsView, 0)
+        val index = if (anchorChild != null && anchorChild.parent === container) {
+            container.indexOfChild(anchorChild).coerceIn(0, container.childCount)
+        } else {
+            0
+        }
+        container.addView(fpsView, index)
         targetList.add(fpsView)
         syncColorWithClock(fpsView)
-        Log.i(TAG, "Injected $TAG_RIGHT into right container $container at index 0")
+        Log.i(TAG, "Injected $TAG_RIGHT into right container $container at index $index")
         updateVisibilities()
     }
 

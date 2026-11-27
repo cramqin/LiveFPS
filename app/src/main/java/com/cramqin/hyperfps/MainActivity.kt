@@ -100,6 +100,7 @@ class MainActivity : Activity() {
     @Volatile private var inAppPollingActive = false
     private var inAppWorker: Thread? = null
     private var pongReceiverRegistered = false
+    private var remotePrefs: android.content.SharedPreferences? = null
 
     // Overlay Appearance State
     private var overlayFont = "mono"
@@ -153,6 +154,29 @@ class MainActivity : Activity() {
         statusBarVerticalOffset = prefs.getInt(KEY_STATUSBAR_VERTICAL_OFFSET, 0)
         statusBarFont = prefs.getString(KEY_STATUSBAR_FONT, "default") ?: "default"
         statusBarCustomFontPath = prefs.getString(KEY_STATUSBAR_CUSTOM_FONT_PATH, "") ?: ""
+
+        runCatching {
+            io.github.libxposed.service.XposedServiceHelper.registerListener(object : io.github.libxposed.service.XposedServiceHelper.OnServiceListener {
+                override fun onServiceBind(service: io.github.libxposed.service.XposedService) {
+                    val rp = service.getRemotePreferences(PREFS_NAME)
+                    remotePrefs = rp
+                    rp.edit().apply {
+                        putBoolean(KEY_STATUSBAR_ENABLED, isStatusBarEnabled)
+                        putString(KEY_STATUSBAR_POSITION, statusBarPosition)
+                        putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize)
+                        putBoolean(KEY_STATUSBAR_BOLD, statusBarBold)
+                        putInt(KEY_STATUSBAR_MARGIN_LEFT, statusBarMarginLeft)
+                        putInt(KEY_STATUSBAR_MARGIN_RIGHT, statusBarMarginRight)
+                        putInt(KEY_STATUSBAR_VERTICAL_OFFSET, statusBarVerticalOffset)
+                        putString(KEY_STATUSBAR_FONT, statusBarFont)
+                        putString(KEY_STATUSBAR_CUSTOM_FONT_PATH, statusBarCustomFontPath)
+                    }.apply()
+                }
+                override fun onServiceDied(service: io.github.libxposed.service.XposedService) {
+                    remotePrefs = null
+                }
+            })
+        }
 
         overlayFont = prefs.getString(KEY_OVERLAY_FONT, "mono") ?: "mono"
         overlayCustomFontPath = prefs.getString(KEY_OVERLAY_CUSTOM_FONT_PATH, "") ?: ""
@@ -1074,6 +1098,9 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply(block).apply()
         runCatching {
+            remotePrefs?.edit()?.apply(block)?.apply()
+        }
+        runCatching {
             val file = java.io.File(applicationInfo.dataDir, "shared_prefs/$PREFS_NAME.xml")
             if (file.exists()) {
                 file.setReadable(true, false)
@@ -1974,21 +2001,6 @@ class MainActivity : Activity() {
         isLsposedActive = false
         sendBroadcast(Intent(ACTION_PING).setPackage("com.android.systemui"))
 
-        FpsState.listener = { fps, label ->
-            runOnUiThread {
-                if (label == "no root") {
-                    hasRoot = false
-                    rootChecked = true
-                    refreshCapabilityUi()
-                } else if (fps != null) {
-                    hasRoot = true
-                    rootChecked = true
-                    refreshCapabilityUi()
-                }
-                updateFpsDisplay(fps, label)
-            }
-        }
-        updateFpsDisplay(FpsState.currentFps, FpsState.currentLabel)
         refreshUi()
         refreshCapabilityUi()
         dispatchStatusBarConfig()
@@ -1997,12 +2009,16 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         stopInAppFpsPoller()
-        FpsState.listener = null
         if (pongReceiverRegistered) {
             runCatching { unregisterReceiver(pongReceiver) }
             pongReceiverRegistered = false
         }
         super.onPause()
+    }
+
+    override fun onStop() {
+        stopInAppFpsPoller()
+        super.onStop()
     }
 
     private fun startInAppFpsPoller() {
@@ -2027,60 +2043,47 @@ class MainActivity : Activity() {
                 return out
             }
 
+            fun readFrames(): Long? {
+                val lines = sh("dumpsys SurfaceFlinger --timestats -dump")
+                for (line in lines) {
+                    val m = FRAMES_RE.find(line)
+                    if (m != null) {
+                        return m.groupValues[1].toLongOrNull()
+                    }
+                }
+                return null
+            }
+
             try {
+                proc = ProcessBuilder("su").redirectErrorStream(true).start()
+                w = proc.outputStream.bufferedWriter()
+                r = proc.inputStream.bufferedReader()
+                val idLines = sh("id")
+                if (!idLines.any { it.contains("uid=0") }) {
+                    throw SecurityException("su denied")
+                }
+                hasRoot = true
+                rootChecked = true
+                runOnUiThread { refreshCapabilityUi() }
+                sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
+
+                // Take immediate baseline sample so first update arrives after 1 interval
+                lastFrames = readFrames() ?: -1L
+                lastTime = SystemClock.elapsedRealtimeNanos()
+
                 while (inAppPollingActive) {
-                    if (FpsService.running) {
-                        if (!rootChecked) {
-                            val checkProc = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-                            val out = checkProc.inputStream.bufferedReader().readText()
-                            checkProc.waitFor()
-                            hasRoot = out.contains("uid=0")
-                            rootChecked = true
-                            runOnUiThread { refreshCapabilityUi() }
-                        }
-                        Thread.sleep(1000)
-                        continue
-                    }
-
-                    if (proc == null) {
-                        proc = ProcessBuilder("su").redirectErrorStream(true).start()
-                        w = proc.outputStream.bufferedWriter()
-                        r = proc.inputStream.bufferedReader()
-                        val idLines = sh("id")
-                        if (!idLines.any { it.contains("uid=0") }) {
-                            throw SecurityException("su denied")
-                        }
-                        hasRoot = true
-                        rootChecked = true
-                        runOnUiThread { refreshCapabilityUi() }
-                        sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
-                        lastTime = SystemClock.elapsedRealtimeNanos()
-                        lastFrames = -1L
-                    }
-
                     Thread.sleep(1200)
-                    if (!inAppPollingActive || FpsService.running) continue
+                    if (!inAppPollingActive) break
 
-                    val lines = sh("dumpsys SurfaceFlinger --timestats -dump")
+                    val currentFrames = readFrames()
                     val now = SystemClock.elapsedRealtimeNanos()
-                    var currentFrames: Long? = null
-                    for (line in lines) {
-                        val m = FRAMES_RE.find(line)
-                        if (m != null) {
-                            currentFrames = m.groupValues[1].toLongOrNull()
-                            break
-                        }
-                    }
-
                     if (currentFrames != null && lastFrames >= 0) {
                         val dt = (now - lastTime) / 1e9
                         val df = currentFrames - lastFrames
                         if (dt > 0 && df >= 0) {
                             val fpsVal = df / dt
                             runOnUiThread {
-                                if (!FpsService.running) {
-                                    updateFpsDisplay(fpsVal, "%.0f fps".format(fpsVal))
-                                }
+                                updateFpsDisplay(fpsVal, "%.0f fps".format(fpsVal))
                             }
                         }
                     }
@@ -2095,9 +2098,7 @@ class MainActivity : Activity() {
                 rootChecked = true
                 runOnUiThread {
                     refreshCapabilityUi()
-                    if (!FpsService.running) {
-                        updateFpsDisplay(null, "no root")
-                    }
+                    updateFpsDisplay(null, "no root")
                 }
             } finally {
                 runCatching {
@@ -2133,7 +2134,7 @@ class MainActivity : Activity() {
                 statusBarWarningView.text = "⚠️ Root access denied. Status Bar FPS and Restart UI are disabled."
                 statusBarWarningView.visibility = View.VISIBLE
             } else if (!isLsposedActive) {
-                statusBarWarningView.text = "⚠️ Not activated in LSPosed. Enable HyperFPS for System UI & Restart UI."
+                statusBarWarningView.text = "⚠️ Not activated in LSPosed. Enable HyperFPS for System UI & soft reboot."
                 statusBarWarningView.visibility = View.VISIBLE
             } else {
                 statusBarWarningView.visibility = View.GONE
