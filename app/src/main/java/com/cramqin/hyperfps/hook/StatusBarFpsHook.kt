@@ -251,8 +251,8 @@ object StatusBarFpsHook {
                         val leftContainer = startSide ?: (clockView?.parent as? ViewGroup)
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
-                        val rootView = leftContainer?.rootView ?: endSide?.rootView
-                        val (rightContainer, anchorChild) = resolveRightTarget(rootView, context, endSide)
+                        val statusBarScope = (leftContainer?.parent as? View) ?: leftContainer?.rootView ?: endSide?.rootView
+                        val (rightContainer, anchorChild) = resolveRightTarget(statusBarScope, context, endSide)
                         injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
@@ -277,7 +277,8 @@ object StatusBarFpsHook {
                         val leftContainer = clockView?.parent as? ViewGroup
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
-                        val (rightContainer, anchorChild) = resolveRightTarget(rootView, context, null)
+                        val statusBarScope = (leftContainer?.parent as? View) ?: rootView
+                        val (rightContainer, anchorChild) = resolveRightTarget(statusBarScope, context, null)
                         injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
@@ -301,7 +302,8 @@ object StatusBarFpsHook {
                         val leftContainer = clockView?.parent as? ViewGroup
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
-                        val (rightContainer, anchorChild) = resolveRightTarget(view, context, null)
+                        val statusBarScope = (leftContainer?.parent as? View) ?: view
+                        val (rightContainer, anchorChild) = resolveRightTarget(statusBarScope, context, null)
                         injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
@@ -311,23 +313,33 @@ object StatusBarFpsHook {
     }
 
     private fun resolveRightTarget(
-        rootView: View?,
+        scopeView: View?,
         context: Context,
         fallbackEndSide: ViewGroup?
     ): Pair<ViewGroup?, View?> {
         val res = context.resources
-        // 1. Prefer status_icons_container (AlphaOptimizedLinearLayout) with system_icon_area as anchor
+
+        // 1. Main HyperOS status bar: status_icon_area (LinearLayout) -> system_icons_container (MiuiStatusBatteryContainer)
+        val statusIconAreaId = res.getIdentifier("status_icon_area", "id", PKG_SYSTEMUI)
+        val sysIconsContainerId = res.getIdentifier("system_icons_container", "id", PKG_SYSTEMUI)
+        val statusIconArea = if (statusIconAreaId != 0) scopeView?.findViewById<ViewGroup>(statusIconAreaId) else null
+        val sysIconsContainer = if (sysIconsContainerId != 0) scopeView?.findViewById<View>(sysIconsContainerId) else null
+        if (statusIconArea != null) {
+            return Pair(statusIconArea, sysIconsContainer)
+        }
+
+        // 2. Alternate status bar layout: status_icons_container -> system_icon_area
         val statusIconsContainerId = res.getIdentifier("status_icons_container", "id", PKG_SYSTEMUI)
         val systemIconAreaId = res.getIdentifier("system_icon_area", "id", PKG_SYSTEMUI)
-        val statusIconsContainer = if (statusIconsContainerId != 0) rootView?.findViewById<ViewGroup>(statusIconsContainerId) else null
-        val systemIconArea = if (systemIconAreaId != 0) rootView?.findViewById<View>(systemIconAreaId) else null
+        val statusIconsContainer = if (statusIconsContainerId != 0) scopeView?.findViewById<ViewGroup>(statusIconsContainerId) else null
+        val systemIconArea = if (systemIconAreaId != 0) scopeView?.findViewById<View>(systemIconAreaId) else null
         if (statusIconsContainer != null) {
             return Pair(statusIconsContainer, systemIconArea)
         }
 
-        // 2. Fallback via battery view: walk above MiuiStatusBatteryContainer into its LinearLayout parent
+        // 3. Fallback via battery view: walk above MiuiStatusBatteryContainer into its LinearLayout parent
         val batteryId = res.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
-        val batteryView = if (batteryId != 0) rootView?.findViewById<View>(batteryId) else null
+        val batteryView = if (batteryId != 0) scopeView?.findViewById<View>(batteryId) else null
         val batteryParent = batteryView?.parent as? ViewGroup
         if (batteryParent != null) {
             if (batteryParent.javaClass.simpleName.contains("BatteryContainer") || batteryParent !is LinearLayout) {
