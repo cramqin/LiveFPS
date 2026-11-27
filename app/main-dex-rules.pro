@@ -1,0 +1,2 @@
+-keep class dev.livefps.hook.** { *; }
+-keep class io.github.libxposed.** { *; }

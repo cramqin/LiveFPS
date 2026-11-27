@@ -26,6 +26,7 @@ class MainHook : XposedModule() {
     override fun onPackageReady(param: PackageReadyParam) {
         super.onPackageReady(param)
         Log.i("LiveFPS", "MainHook onPackageReady: pkg=${param.packageName}")
+        if (!param.isFirstPackage) return
         when (param.packageName) {
             "com.android.systemui", "miui.systemui.plugin" -> {
                 runCatching {

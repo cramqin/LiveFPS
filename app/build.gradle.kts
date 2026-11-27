@@ -23,6 +23,12 @@ android {
         jvmTarget = "17"
     }
 
+    buildTypes {
+        debug {
+            multiDexKeepProguard = file("main-dex-rules.pro")
+        }
+    }
+
     packaging {
         resources {
             merges += listOf("META-INF/xposed/*")
