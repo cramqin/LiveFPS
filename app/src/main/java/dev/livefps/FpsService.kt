@@ -117,18 +117,14 @@ class FpsService : Service() {
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
         val insets = if (Build.VERSION.SDK_INT >= 30) {
-            v.rootWindowInsets ?: wm.currentWindowMetrics.windowInsets
+            wm.currentWindowMetrics.windowInsets
         } else null
 
         val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
             insets.isVisible(WindowInsets.Type.statusBars())
         } else true
 
-        val insetsTop = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
-            insets.getInsets(WindowInsets.Type.statusBars()).top
-        } else 0
-
-        val statusBarHeight = systemStatusBarHeight // fixed: window-relative insetsTop varies with overlay position (feedback loop)
+        val statusBarHeight = systemStatusBarHeight
 
         val bounds = if (Build.VERSION.SDK_INT >= 30) {
             wm.currentWindowMetrics.bounds
@@ -143,11 +139,13 @@ class FpsService : Service() {
         val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
         val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
 
-        val portraitMinY = (statusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
-        val minY = if (isLandscape) {
-            if (isStatusBarVisible) statusBarHeight - (4 * dp).toInt() else 0
+        val portraitElevatedY = (statusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val landscapeElevatedY = (statusBarHeight - (7 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+
+        val minY = if (isStatusBarVisible) {
+            if (isLandscape) landscapeElevatedY else portraitElevatedY
         } else {
-            portraitMinY
+            0
         }
 
         val maxX = (screenW - width).coerceAtLeast(0)
@@ -158,7 +156,7 @@ class FpsService : Service() {
             val preferred = if (userLandscapeY >= 0) userLandscapeY else minY
             preferred.coerceIn(minY, maxY)
         } else {
-            val preferred = if (userPortraitY >= 0) userPortraitY else portraitMinY
+            val preferred = if (userPortraitY >= 0) userPortraitY else minY
             preferred.coerceIn(minY, maxY)
         }
 
@@ -286,25 +284,26 @@ class FpsService : Service() {
 
         val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
         val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
-        val portraitMinY = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val portraitElevatedY = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val landscapeElevatedY = (systemStatusBarHeight - (7 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
 
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30) {
             wm.currentWindowMetrics.windowInsets.isVisible(WindowInsets.Type.statusBars())
         } else true
-        val initialMinY = if (isLandscape) {
-            if (isStatusBarVisible) systemStatusBarHeight - (4 * dp).toInt() else 0
+        val initialMinY = if (isStatusBarVisible) {
+            if (isLandscape) landscapeElevatedY else portraitElevatedY
         } else {
-            portraitMinY
+            0
         }
 
-        if (userPortraitY < 0) userPortraitY = portraitMinY
+        if (userPortraitY < 0) userPortraitY = portraitElevatedY
         if (userLandscapeY < 0) userLandscapeY = initialMinY
 
         val initialY = if (isLandscape) {
-            userLandscapeY.coerceAtLeast(initialMinY)
+            if (userLandscapeY >= 0) userLandscapeY.coerceAtLeast(initialMinY) else initialMinY
         } else {
-            userPortraitY.coerceAtLeast(initialMinY)
+            if (userPortraitY >= 0) userPortraitY.coerceAtLeast(initialMinY) else initialMinY
         }
 
         val tv = TextView(this).apply {
@@ -361,22 +360,20 @@ class FpsService : Service() {
                     val screenH = bounds.height()
 
                     val insets = if (Build.VERSION.SDK_INT >= 30) {
-                        v.rootWindowInsets ?: wm.currentWindowMetrics.windowInsets
+                        wm.currentWindowMetrics.windowInsets
                     } else null
                     val isStatusBarVisibleNow = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
                         insets.isVisible(WindowInsets.Type.statusBars())
                     } else true
-                    val insetsTop = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
-                        insets.getInsets(WindowInsets.Type.statusBars()).top
-                    } else 0
                     val currentStatusBarH = systemStatusBarHeight
-                    val currentSnugMargin = (currentStatusBarH - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+                    val currentPortraitElevatedY = (currentStatusBarH - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+                    val currentLandscapeElevatedY = (currentStatusBarH - (7 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
 
                     val isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-                    val minY = if (isLandscapeNow) {
-                        if (isStatusBarVisibleNow) currentStatusBarH - (4 * dp).toInt() else 0
+                    val minY = if (isStatusBarVisibleNow) {
+                        if (isLandscapeNow) currentLandscapeElevatedY else currentPortraitElevatedY
                     } else {
-                        currentSnugMargin
+                        0
                     }
                     val maxX = (screenW - width).coerceAtLeast(0)
                     val maxY = (screenH - height).coerceAtLeast(minY)
