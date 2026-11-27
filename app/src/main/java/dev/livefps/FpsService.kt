@@ -143,11 +143,11 @@ class FpsService : Service() {
         val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
         val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
 
-        val snugMargin = (statusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val portraitMinY = (statusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
         val minY = if (isLandscape) {
-            if (isStatusBarVisible) snugMargin else 0
+            if (isStatusBarVisible) statusBarHeight else 0
         } else {
-            snugMargin
+            portraitMinY
         }
 
         val maxX = (screenW - width).coerceAtLeast(0)
@@ -158,7 +158,7 @@ class FpsService : Service() {
             val preferred = if (userLandscapeY >= 0) userLandscapeY else minY
             preferred.coerceIn(minY, maxY)
         } else {
-            val preferred = if (userPortraitY >= 0) userPortraitY else snugMargin
+            val preferred = if (userPortraitY >= 0) userPortraitY else portraitMinY
             preferred.coerceIn(minY, maxY)
         }
 
@@ -286,19 +286,19 @@ class FpsService : Service() {
 
         val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
         val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
-        val snugMargin = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val portraitMinY = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
 
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30) {
             wm.currentWindowMetrics.windowInsets.isVisible(WindowInsets.Type.statusBars())
         } else true
         val initialMinY = if (isLandscape) {
-            if (isStatusBarVisible) snugMargin else 0
+            if (isStatusBarVisible) systemStatusBarHeight else 0
         } else {
-            snugMargin
+            portraitMinY
         }
 
-        if (userPortraitY < 0) userPortraitY = snugMargin
+        if (userPortraitY < 0) userPortraitY = portraitMinY
         if (userLandscapeY < 0) userLandscapeY = initialMinY
 
         val initialY = if (isLandscape) {
@@ -374,7 +374,7 @@ class FpsService : Service() {
 
                     val isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
                     val minY = if (isLandscapeNow) {
-                        if (isStatusBarVisibleNow) currentSnugMargin else 0
+                        if (isStatusBarVisibleNow) currentStatusBarH else 0
                     } else {
                         currentSnugMargin
                     }
