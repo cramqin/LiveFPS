@@ -4,8 +4,10 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -13,18 +15,25 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import java.io.BufferedReader
+import java.io.BufferedWriter
 
 class MainActivity : Activity() {
 
@@ -40,6 +49,8 @@ class MainActivity : Activity() {
         const val KEY_STATUSBAR_FONT = "statusbar_font"
         const val KEY_STATUSBAR_CUSTOM_FONT_PATH = "statusbar_custom_font_path"
         const val ACTION_CONFIG_CHANGED = "com.cramqin.hyperfps.ACTION_CONFIG_CHANGED"
+        const val ACTION_PING = "com.cramqin.hyperfps.ACTION_PING"
+        const val ACTION_PONG = "com.cramqin.hyperfps.ACTION_PONG"
         const val KEY_OVERLAY_FONT = "overlay_font"
         const val KEY_OVERLAY_CUSTOM_FONT_PATH = "overlay_custom_font_path"
         const val KEY_OVERLAY_BOLD = "overlay_bold"
@@ -48,6 +59,7 @@ class MainActivity : Activity() {
         const val KEY_OVERLAY_BG_STYLE = "overlay_bg_style"
         const val KEY_OVERLAY_SHAPE = "overlay_shape"
         const val KEY_OVERLAY_PADDING = "overlay_padding"
+        private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
     }
 
     private lateinit var fpsNumberView: TextView
@@ -55,8 +67,12 @@ class MainActivity : Activity() {
     private lateinit var fpsStatusPill: TextView
     private lateinit var actionButton: Button
     private lateinit var permissionBanner: LinearLayout
+    private lateinit var restartUiBtn: TextView
     // Status Bar Card Views
     private lateinit var statusBarToggleBtn: Button
+    private lateinit var statusBarWarningView: TextView
+    private lateinit var statusBarPreviewLeftView: TextView
+    private lateinit var statusBarPreviewRightView: TextView
     private lateinit var posLeftBtn: TextView
     private lateinit var posRightBtn: TextView
 
@@ -76,6 +92,14 @@ class MainActivity : Activity() {
     private var statusBarFont = "default"
     private var statusBarCustomFontPath = ""
     private val statusBarFontButtons = mutableMapOf<String, TextView>()
+
+    // Capability & In-App Polling State
+    @Volatile private var hasRoot = false
+    @Volatile private var rootChecked = false
+    @Volatile private var isLsposedActive = false
+    @Volatile private var inAppPollingActive = false
+    private var inAppWorker: Thread? = null
+    private var pongReceiverRegistered = false
 
     // Overlay Appearance State
     private var overlayFont = "mono"
@@ -276,14 +300,22 @@ class MainActivity : Activity() {
         }
         topRow.addView(spacer)
 
-        val restartUiBtn = TextView(this).apply {
+        restartUiBtn = TextView(this).apply {
             text = "🔄 Restart UI"
             textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.parseColor("#E0E0E0"))
             background = roundedBox(Color.parseColor("#252528"), 8f, Color.parseColor("#38383A"), 1f)
             setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
-            setOnClickListener { promptRestartSystemUi() }
+            isEnabled = false
+            alpha = 0.35f
+            setOnClickListener {
+                if (hasRoot) {
+                    promptRestartSystemUi()
+                } else {
+                    Toast.makeText(this@MainActivity, "Root access required", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
         topRow.addView(restartUiBtn)
 
@@ -306,6 +338,7 @@ class MainActivity : Activity() {
     }
 
     private fun promptRestartSystemUi() {
+        if (!hasRoot) return
         AlertDialog.Builder(this)
             .setTitle("Restart SystemUI?")
             .setMessage("This will restart Android SystemUI to reload status bar changes. The screen will flicker briefly.")
@@ -437,6 +470,22 @@ class MainActivity : Activity() {
         }
         card.addView(desc)
 
+        // Warning banner when not rooted or not active in LSPosed
+        statusBarWarningView = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.parseColor("#FFB74D"))
+            background = roundedBox(Color.parseColor("#2A1D0A"), 10f, Color.parseColor("#FF9800"), 1f)
+            setPadding(dp(12f), dp(8f), dp(12f), dp(8f))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.bottomMargin = dp(10f)
+            layoutParams = lp
+            visibility = View.GONE
+        }
+        card.addView(statusBarWarningView)
+
         // Toggle Status Bar Button
         statusBarToggleBtn = Button(this).apply {
             textSize = 14f
@@ -448,6 +497,7 @@ class MainActivity : Activity() {
             lp.bottomMargin = dp(12f)
             layoutParams = lp
             setOnClickListener {
+                if (!hasRoot || !isLsposedActive) return@setOnClickListener
                 isStatusBarEnabled = !isStatusBarEnabled
                 savePrefsAndWorldReadable {
                     putBoolean(KEY_STATUSBAR_ENABLED, isStatusBarEnabled)
@@ -507,6 +557,77 @@ class MainActivity : Activity() {
         }
         posRow.addView(posRightBtn)
         card.addView(posRow)
+
+        // Live Status Bar Preview
+        card.addView(buildSubHeader("LIVE STATUS BAR PREVIEW"))
+        val sbPreviewStrip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundedBox(Color.parseColor("#0A0C10"), 10f, Color.parseColor("#2A2E38"), 1f)
+            setPadding(dp(12f), 0, dp(12f), 0)
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(34f)
+            )
+            lp.bottomMargin = dp(4f)
+            layoutParams = lp
+        }
+
+        val simClock = TextView(this).apply {
+            text = "10:34"
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            includeFontPadding = false
+        }
+        sbPreviewStrip.addView(simClock)
+
+        statusBarPreviewLeftView = TextView(this).apply {
+            text = "120"
+            setTextColor(Color.WHITE)
+            isSingleLine = true
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        sbPreviewStrip.addView(statusBarPreviewLeftView)
+
+        val simNotifs = TextView(this).apply {
+            text = " ● ●"
+            textSize = 8f
+            setTextColor(Color.parseColor("#8E8E93"))
+        }
+        sbPreviewStrip.addView(simNotifs)
+
+        val sbSpacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+        }
+        sbPreviewStrip.addView(sbSpacer)
+
+        statusBarPreviewRightView = TextView(this).apply {
+            text = "120"
+            setTextColor(Color.WHITE)
+            isSingleLine = true
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        sbPreviewStrip.addView(statusBarPreviewRightView)
+
+        val simIcons = TextView(this).apply {
+            text = " 0.00 K/s  📶 🔋"
+            textSize = 10f
+            setTextColor(Color.parseColor("#C7C7CC"))
+            includeFontPadding = false
+        }
+        sbPreviewStrip.addView(simIcons)
+        card.addView(sbPreviewStrip)
 
         // Customization Section Header with Reset
         val customSectionHeader = LinearLayout(this).apply {
@@ -863,6 +984,36 @@ class MainActivity : Activity() {
                 }
             }
         }
+
+        if (::statusBarPreviewLeftView.isInitialized && ::statusBarPreviewRightView.isInitialized) {
+            val density = resources.displayMetrics.density
+            val leftPx = (statusBarMarginLeft * density).toInt()
+            val rightPx = (statusBarMarginRight * density).toInt()
+            val baseTypeface = if (statusBarFont == "custom" && statusBarCustomFontPath.isNotBlank()) {
+                runCatching {
+                    val f = java.io.File(statusBarCustomFontPath)
+                    if (f.exists() && f.canRead()) Typeface.createFromFile(f) else null
+                }.getOrNull() ?: Typeface.DEFAULT
+            } else {
+                when (statusBarFont) {
+                    "mono", "monospace" -> Typeface.MONOSPACE
+                    "sans", "sans-serif" -> Typeface.SANS_SERIF
+                    "serif" -> Typeface.SERIF
+                    else -> Typeface.DEFAULT
+                }
+            }
+            val resolvedTf = Typeface.create(baseTypeface, if (statusBarBold) Typeface.BOLD else Typeface.NORMAL)
+
+            listOf(statusBarPreviewLeftView, statusBarPreviewRightView).forEach { pv ->
+                pv.textSize = statusBarFontSize
+                pv.typeface = resolvedTf
+                pv.translationY = statusBarVerticalOffset * density
+                pv.setPaddingRelative(leftPx, 0, rightPx, 0)
+                pv.alpha = if (isStatusBarEnabled) 1.0f else 0.45f
+            }
+            statusBarPreviewLeftView.visibility = if (statusBarPosition == "left") View.VISIBLE else View.GONE
+            statusBarPreviewRightView.visibility = if (statusBarPosition == "right") View.VISIBLE else View.GONE
+        }
     }
 
     private fun promptCustomStatusBarFont() {
@@ -915,6 +1066,7 @@ class MainActivity : Activity() {
             putString(KEY_STATUSBAR_POSITION, pos)
         }
         refreshStatusBarUi()
+        refreshAppearanceUi()
         dispatchStatusBarConfig()
     }
 
@@ -1088,22 +1240,134 @@ class MainActivity : Activity() {
     }
 
     private fun promptCustomColor() {
-        val input = EditText(this).apply {
-            hint = "#00E676"
-            setText(overlayColor)
-            inputType = InputType.TYPE_CLASS_TEXT
+        val currentInt = runCatching { Color.parseColor(overlayColor) }.getOrDefault(Color.parseColor("#00E676"))
+        val hsv = FloatArray(3)
+        Color.colorToHSV(currentInt, hsv)
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20f), dp(16f), dp(20f), dp(8f))
         }
-        AlertDialog.Builder(this)
-            .setTitle("Enter Hex Color")
-            .setView(input)
-            .setPositiveButton("Apply") { _, _ ->
-                val txt = input.text.toString().trim()
-                if (txt.matches(Regex("""^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"""))) {
-                    overlayColor = txt
-                    saveOverlayPrefs()
-                } else {
-                    Toast.makeText(this, "Invalid hex (e.g. #00E676)", Toast.LENGTH_SHORT).show()
+
+        val previewSwatch = TextView(this).apply {
+            text = "120 fps  •  #${Integer.toHexString(currentInt).uppercase().padStart(8, '0').takeLast(6)}"
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(currentInt)
+            background = roundedBox(Color.parseColor("#141820"), 12f, currentInt, 1.5f)
+            setPadding(dp(12f), dp(14f), dp(12f), dp(14f))
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.bottomMargin = dp(16f)
+            layoutParams = lp
+        }
+        container.addView(previewSwatch)
+
+        val hexInput = EditText(this).apply {
+            hint = "#00E676"
+            setText("#${Integer.toHexString(currentInt).uppercase().padStart(8, '0').takeLast(6)}")
+            inputType = InputType.TYPE_CLASS_TEXT
+            textSize = 13f
+        }
+
+        var updatingFromSliders = false
+        var updatingFromHex = false
+
+        fun updatePreviewFromHsv() {
+            val c = Color.HSVToColor(hsv)
+            val hex = "#%06X".format(0xFFFFFF and c)
+            previewSwatch.text = "120 fps  •  $hex"
+            previewSwatch.setTextColor(c)
+            previewSwatch.background = roundedBox(Color.parseColor("#141820"), 12f, c, 1.5f)
+            if (!updatingFromHex) {
+                updatingFromSliders = true
+                hexInput.setText(hex)
+                updatingFromSliders = false
+            }
+        }
+
+        fun addSlider(label: String, max: Int, initial: Int, trackColors: IntArray?, onChange: (Int) -> Unit): SeekBar {
+            val lbl = TextView(this).apply {
+                text = label
+                textSize = 11f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.parseColor("#8E8E93"))
+            }
+            container.addView(lbl)
+
+            val sb = SeekBar(this).apply {
+                this.max = max
+                progress = initial
+                if (trackColors != null) {
+                    progressDrawable = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, trackColors).apply {
+                        cornerRadius = dp(6f).toFloat()
+                    }
                 }
+                val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                lp.topMargin = dp(4f)
+                lp.bottomMargin = dp(12f)
+                layoutParams = lp
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                        if (fromUser && !updatingFromHex) {
+                            onChange(p)
+                            updatePreviewFromHsv()
+                        }
+                    }
+                    override fun onStartTrackingTouch(s: SeekBar?) {}
+                    override fun onStopTrackingTouch(s: SeekBar?) {}
+                })
+            }
+            container.addView(sb)
+            return sb
+        }
+
+        val hueColors = intArrayOf(
+            Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA, Color.RED
+        )
+        val hueBar = addSlider("HUE", 360, hsv[0].toInt(), hueColors) { hsv[0] = it.toFloat() }
+        val satBar = addSlider("SATURATION", 100, (hsv[1] * 100).toInt(), null) { hsv[1] = it / 100f }
+        val valBar = addSlider("BRIGHTNESS", 100, (hsv[2] * 100).toInt(), null) { hsv[2] = it / 100f }
+
+        val hexLabel = TextView(this).apply {
+            text = "HEX CODE"
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.parseColor("#8E8E93"))
+        }
+        container.addView(hexLabel)
+        hexInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (updatingFromSliders) return
+                val txt = s?.toString()?.trim() ?: return
+                if (txt.matches(Regex("""^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"""))) {
+                    updatingFromHex = true
+                    val parsed = Color.parseColor(txt)
+                    Color.colorToHSV(parsed, hsv)
+                    hueBar.progress = hsv[0].toInt()
+                    satBar.progress = (hsv[1] * 100).toInt()
+                    valBar.progress = (hsv[2] * 100).toInt()
+                    updatePreviewFromHsv()
+                    updatingFromHex = false
+                }
+            }
+        })
+        container.addView(hexInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("Pick Overlay Color")
+            .setView(container)
+            .setPositiveButton("Apply") { _, _ ->
+                val txt = hexInput.text.toString().trim()
+                val finalHex = if (txt.matches(Regex("""^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"""))) {
+                    txt.uppercase()
+                } else {
+                    "#%06X".format(0xFFFFFF and Color.HSVToColor(hsv))
+                }
+                overlayColor = finalHex
+                saveOverlayPrefs()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -1166,22 +1430,44 @@ class MainActivity : Activity() {
         headerRow.addView(resetBtn)
         card.addView(headerRow)
 
-        // Live Preview Box
-        val previewContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            background = roundedBox(Color.parseColor("#141416"), 14f, Color.parseColor("#262629"), 1f)
-            setPadding(dp(16f), dp(18f), dp(16f), dp(18f))
+        // Realistic Simulated App/Game Backdrop for Overlay Preview
+        val previewContainer = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.parseColor("#1E3A5F"), Color.parseColor("#162438"), Color.parseColor("#12151E"))
+            ).apply {
+                cornerRadius = dp(14f).toFloat()
+                setStroke(dp(1f), Color.parseColor("#2E3B4E"))
+            }
             val lp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(88f)
             )
             lp.bottomMargin = dp(14f)
             layoutParams = lp
         }
 
+        val simWatermark = TextView(this).apply {
+            text = "SIMULATED APP SCREEN"
+            textSize = 9f
+            letterSpacing = 0.08f
+            setTextColor(Color.parseColor("#4DFFFFFF"))
+            val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                setMargins(0, 0, dp(10f), dp(6f))
+            }
+            layoutParams = lp
+        }
+        previewContainer.addView(simWatermark)
+
         overlayPreviewView = TextView(this).apply {
             text = "120 fps"
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER
+            }
         }
         previewContainer.addView(overlayPreviewView)
         card.addView(previewContainer)
@@ -1328,13 +1614,13 @@ class MainActivity : Activity() {
         }
 
         val customColorBtn = TextView(this).apply {
-            text = "HEX"
+            text = "🎨 Pick"
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            background = roundedBox(Color.parseColor("#2C2C2E"), 6f, Color.parseColor("#38383A"), 1f)
-            setPadding(dp(8f), dp(4f), dp(8f), dp(4f))
+            background = roundedBox(Color.parseColor("#2C2C2E"), 8f, Color.parseColor("#38383A"), 1f)
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
             setOnClickListener { promptCustomColor() }
         }
         colorRow.addView(customColorBtn)
@@ -1665,19 +1951,194 @@ class MainActivity : Activity() {
         return card
     }
 
+    private val pongReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_PONG) {
+                isLsposedActive = true
+                runOnUiThread { refreshCapabilityUi() }
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        if (!pongReceiverRegistered) {
+            val filter = IntentFilter(ACTION_PONG)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(pongReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(pongReceiver, filter)
+            }
+            pongReceiverRegistered = true
+        }
+        isLsposedActive = false
+        sendBroadcast(Intent(ACTION_PING).setPackage("com.android.systemui"))
+
         FpsState.listener = { fps, label ->
-            runOnUiThread { updateFpsDisplay(fps, label) }
+            runOnUiThread {
+                if (label == "no root") {
+                    hasRoot = false
+                    rootChecked = true
+                    refreshCapabilityUi()
+                } else if (fps != null) {
+                    hasRoot = true
+                    rootChecked = true
+                    refreshCapabilityUi()
+                }
+                updateFpsDisplay(fps, label)
+            }
         }
         updateFpsDisplay(FpsState.currentFps, FpsState.currentLabel)
         refreshUi()
+        refreshCapabilityUi()
         dispatchStatusBarConfig()
+        startInAppFpsPoller()
     }
 
     override fun onPause() {
+        stopInAppFpsPoller()
         FpsState.listener = null
+        if (pongReceiverRegistered) {
+            runCatching { unregisterReceiver(pongReceiver) }
+            pongReceiverRegistered = false
+        }
         super.onPause()
+    }
+
+    private fun startInAppFpsPoller() {
+        if (inAppPollingActive) return
+        inAppPollingActive = true
+        inAppWorker = Thread({
+            var proc: Process? = null
+            var w: BufferedWriter? = null
+            var r: BufferedReader? = null
+            var lastTime = SystemClock.elapsedRealtimeNanos()
+            var lastFrames = -1L
+
+            fun sh(cmd: String): List<String> {
+                val out = ArrayList<String>()
+                w!!.write("$cmd\necho __END__\n")
+                w!!.flush()
+                while (true) {
+                    val line = r!!.readLine() ?: break
+                    if (line == "__END__") break
+                    out += line
+                }
+                return out
+            }
+
+            try {
+                while (inAppPollingActive) {
+                    if (FpsService.running) {
+                        if (!rootChecked) {
+                            val checkProc = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+                            val out = checkProc.inputStream.bufferedReader().readText()
+                            checkProc.waitFor()
+                            hasRoot = out.contains("uid=0")
+                            rootChecked = true
+                            runOnUiThread { refreshCapabilityUi() }
+                        }
+                        Thread.sleep(1000)
+                        continue
+                    }
+
+                    if (proc == null) {
+                        proc = ProcessBuilder("su").redirectErrorStream(true).start()
+                        w = proc.outputStream.bufferedWriter()
+                        r = proc.inputStream.bufferedReader()
+                        val idLines = sh("id")
+                        if (!idLines.any { it.contains("uid=0") }) {
+                            throw SecurityException("su denied")
+                        }
+                        hasRoot = true
+                        rootChecked = true
+                        runOnUiThread { refreshCapabilityUi() }
+                        sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
+                        lastTime = SystemClock.elapsedRealtimeNanos()
+                        lastFrames = -1L
+                    }
+
+                    Thread.sleep(1200)
+                    if (!inAppPollingActive || FpsService.running) continue
+
+                    val lines = sh("dumpsys SurfaceFlinger --timestats -dump")
+                    val now = SystemClock.elapsedRealtimeNanos()
+                    var currentFrames: Long? = null
+                    for (line in lines) {
+                        val m = FRAMES_RE.find(line)
+                        if (m != null) {
+                            currentFrames = m.groupValues[1].toLongOrNull()
+                            break
+                        }
+                    }
+
+                    if (currentFrames != null && lastFrames >= 0) {
+                        val dt = (now - lastTime) / 1e9
+                        val df = currentFrames - lastFrames
+                        if (dt > 0 && df >= 0) {
+                            val fpsVal = df / dt
+                            runOnUiThread {
+                                if (!FpsService.running) {
+                                    updateFpsDisplay(fpsVal, "%.0f fps".format(fpsVal))
+                                }
+                            }
+                        }
+                    }
+                    if (currentFrames != null) {
+                        lastFrames = currentFrames
+                    }
+                    lastTime = now
+                }
+            } catch (_: InterruptedException) {
+            } catch (_: Exception) {
+                hasRoot = false
+                rootChecked = true
+                runOnUiThread {
+                    refreshCapabilityUi()
+                    if (!FpsService.running) {
+                        updateFpsDisplay(null, "no root")
+                    }
+                }
+            } finally {
+                runCatching {
+                    w?.write("exit\n")
+                    w?.flush()
+                    proc?.waitFor()
+                }
+                proc?.destroy()
+            }
+        }, "hyperfps-inapp-reader").apply { start() }
+    }
+
+    private fun stopInAppFpsPoller() {
+        inAppPollingActive = false
+        inAppWorker?.interrupt()
+        inAppWorker = null
+    }
+
+    private fun refreshCapabilityUi() {
+        if (::restartUiBtn.isInitialized) {
+            restartUiBtn.isEnabled = hasRoot
+            restartUiBtn.alpha = if (hasRoot) 1.0f else 0.35f
+        }
+
+        if (::statusBarToggleBtn.isInitialized && ::statusBarWarningView.isInitialized) {
+            val canUseStatusBar = hasRoot && isLsposedActive
+            statusBarToggleBtn.isEnabled = canUseStatusBar
+            statusBarToggleBtn.alpha = if (canUseStatusBar) 1.0f else 0.45f
+
+            if (!rootChecked) {
+                statusBarWarningView.visibility = View.GONE
+            } else if (!hasRoot) {
+                statusBarWarningView.text = "⚠️ Root access denied. Status Bar FPS and Restart UI are disabled."
+                statusBarWarningView.visibility = View.VISIBLE
+            } else if (!isLsposedActive) {
+                statusBarWarningView.text = "⚠️ Not activated in LSPosed. Enable HyperFPS for System UI & Restart UI."
+                statusBarWarningView.visibility = View.VISIBLE
+            } else {
+                statusBarWarningView.visibility = View.GONE
+            }
+        }
     }
 
     @SuppressLint("SetTextI18n")
@@ -1686,31 +2147,23 @@ class MainActivity : Activity() {
             fpsNumberView.text = "%.0f".format(fps)
             fpsNumberView.setTextColor(Color.parseColor("#00E676"))
             fpsUnitView.setTextColor(Color.parseColor("#00E676"))
-            fpsStatusPill.text = "🟢 Active • Updating every 2s"
+            fpsStatusPill.text = if (FpsService.running) "🟢 Overlay Active • SurfaceFlinger" else "🟢 Live • SurfaceFlinger"
             fpsStatusPill.setTextColor(Color.parseColor("#00E676"))
             fpsStatusPill.background = roundedBox(Color.parseColor("#132A1C"), 10f, Color.parseColor("#00E676"), 1f)
-        } else if (FpsService.running) {
-            fpsNumberView.text = label.replace(" fps", "")
-            if (label == "no root") {
-                fpsNumberView.setTextColor(Color.parseColor("#FF5252"))
-                fpsUnitView.setTextColor(Color.parseColor("#FF5252"))
-                fpsStatusPill.text = "🔴 Root access denied (check su / KernelSU)"
-                fpsStatusPill.setTextColor(Color.parseColor("#FF5252"))
-                fpsStatusPill.background = roundedBox(Color.parseColor("#321313"), 10f, Color.parseColor("#FF5252"), 1f)
-            } else {
-                fpsNumberView.setTextColor(Color.parseColor("#FFD600"))
-                fpsUnitView.setTextColor(Color.parseColor("#FFD600"))
-                fpsStatusPill.text = "🟡 Sampling SurfaceFlinger..."
-                fpsStatusPill.setTextColor(Color.parseColor("#FFD600"))
-                fpsStatusPill.background = roundedBox(Color.parseColor("#322B13"), 10f, Color.parseColor("#FFD600"), 1f)
-            }
+        } else if (label == "no root") {
+            fpsNumberView.text = "no root"
+            fpsNumberView.setTextColor(Color.parseColor("#FF5252"))
+            fpsUnitView.setTextColor(Color.parseColor("#FF5252"))
+            fpsStatusPill.text = "🔴 Root access denied (check su / KernelSU)"
+            fpsStatusPill.setTextColor(Color.parseColor("#FF5252"))
+            fpsStatusPill.background = roundedBox(Color.parseColor("#321313"), 10f, Color.parseColor("#FF5252"), 1f)
         } else {
             fpsNumberView.text = "--"
-            fpsNumberView.setTextColor(Color.parseColor("#555555"))
-            fpsUnitView.setTextColor(Color.parseColor("#555555"))
-            fpsStatusPill.text = "⚪ Idle • Tap Start below"
-            fpsStatusPill.setTextColor(Color.parseColor("#8E8E93"))
-            fpsStatusPill.background = roundedBox(Color.parseColor("#252528"), 10f, Color.parseColor("#38383A"), 1f)
+            fpsNumberView.setTextColor(Color.parseColor("#FFD600"))
+            fpsUnitView.setTextColor(Color.parseColor("#FFD600"))
+            fpsStatusPill.text = "🟡 Sampling SurfaceFlinger..."
+            fpsStatusPill.setTextColor(Color.parseColor("#FFD600"))
+            fpsStatusPill.background = roundedBox(Color.parseColor("#322B13"), 10f, Color.parseColor("#FFD600"), 1f)
         }
     }
 

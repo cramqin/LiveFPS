@@ -48,6 +48,8 @@ object StatusBarFpsHook {
     private const val ACTION_CONFIG_CHANGED = "com.cramqin.hyperfps.ACTION_CONFIG_CHANGED"
     private const val ACTION_FPS_UPDATE = "com.cramqin.hyperfps.ACTION_FPS_UPDATE"
     private const val ACTION_STATUSBAR_ACK = "com.cramqin.hyperfps.ACTION_STATUSBAR_ACK"
+    private const val ACTION_PING = "com.cramqin.hyperfps.ACTION_PING"
+    private const val ACTION_PONG = "com.cramqin.hyperfps.ACTION_PONG"
     private const val MSG_WORKER_TICK = 200021
     private const val STATUSBAR_POLL_INTERVAL_MS = 2000L // Fixed 2.0s rate matching HyperCeiler
 
@@ -172,10 +174,17 @@ object StatusBarFpsHook {
         val filter = IntentFilter().apply {
             addAction(ACTION_CONFIG_CHANGED)
             addAction(ACTION_FPS_UPDATE)
+            addAction(ACTION_PING)
         }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 when (intent?.action) {
+                    ACTION_PING -> {
+                        val pongIntent = Intent(ACTION_PONG).apply {
+                            setPackage("com.cramqin.hyperfps")
+                        }
+                        runCatching { ctx?.sendBroadcast(pongIntent) }
+                    }
                     ACTION_CONFIG_CHANGED -> {
                         val prevEnabled = isEnabled
                         isEnabled = intent.getBooleanExtra("enabled", isEnabled)
