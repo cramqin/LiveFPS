@@ -476,6 +476,7 @@ object StatusBarFpsHook {
                         if (clock != null) {
                             mainHandler.post {
                                 cachedClockRef = WeakReference(clock)
+                                ensureInjectedFromClock(clock)
                                 for (v in leftViews) syncColorWithClock(v, clock)
                                 for (v in rightViews) syncColorWithClock(v, clock)
                             }
@@ -484,6 +485,35 @@ object StatusBarFpsHook {
                     }
                 }
             }
+        }
+    }
+
+    private fun ensureInjectedFromClock(clock: TextView) {
+        if (!clock.isAttachedToWindow) return
+        val context = clock.context ?: return
+        registerReceiverWithContext(context)
+
+        var p: View? = clock.parent as? View
+        var scope: View? = null
+        for (i in 0 until 4) {
+            if (p == null) break
+            val (rc, _) = resolveRightTarget(p, context, null)
+            if (rc != null) {
+                scope = p
+                break
+            }
+            p = p.parent as? View
+        }
+        if (scope == null) return
+
+        val leftContainer = clock.parent as? ViewGroup
+        if (leftContainer != null && leftContainer.findViewWithTag<View>(TAG_LEFT) == null) {
+            injectToLeftContainer(leftViews, context, leftContainer, clock)
+        }
+
+        val (rightContainer, anchorChild) = resolveRightTarget(scope, context, null)
+        if (rightContainer != null && rightContainer.findViewWithTag<View>(TAG_RIGHT) == null) {
+            injectToRightContainer(rightViews, context, rightContainer, anchorChild)
         }
     }
 
