@@ -73,6 +73,7 @@ object StatusBarFpsHook {
     @Volatile private var currentPosition = "right"
     @Volatile private var statusBarFontSize = 11f
     @Volatile private var statusBarBold = true
+    @Volatile private var statusBarColor = "#FFFFFF"
     @Volatile private var statusBarMarginLeft = 1
     @Volatile private var statusBarMarginRight = 1
     @Volatile private var statusBarVerticalOffset = 0
@@ -120,7 +121,7 @@ object StatusBarFpsHook {
     fun init(module: XposedModule, classLoader: ClassLoader) {
         Log.i(TAG, "StatusBarFpsHook initializing (standalone TextView container injection)")
 
-        // 1. Read initial preferences
+        // 1. Read initial preferences from local JSON / XML / RemotePreferences
         loadInitialPrefs(module)
 
         // 2. Early broadcast receiver registration via Application.onCreate
@@ -137,24 +138,100 @@ object StatusBarFpsHook {
     }
 
     private fun loadInitialPrefs(module: XposedModule) {
+        var loaded = false
+
+        // Strategy 1: Read JSON from /data/local/tmp/hyperfps_config.json (world-readable, boot persistent)
+        runCatching {
+            val f = java.io.File("/data/local/tmp/hyperfps_config.json")
+            if (f.exists() && f.canRead()) {
+                val json = org.json.JSONObject(f.readText())
+                applyJsonConfig(json)
+                loaded = true
+                Log.i(TAG, "Loaded initial config from /data/local/tmp/hyperfps_config.json: enabled=$isEnabled, pos=$currentPosition, col=$statusBarColor")
+            }
+        }
+
+        // Strategy 2: Read JSON from app internal files dir
+        if (!loaded) {
+            runCatching {
+                val f = java.io.File("/data/user/0/com.cramqin.hyperfps/files/hyperfps_config.json")
+                if (f.exists() && f.canRead()) {
+                    val json = org.json.JSONObject(f.readText())
+                    applyJsonConfig(json)
+                    loaded = true
+                    Log.i(TAG, "Loaded initial config from app files dir: enabled=$isEnabled, pos=$currentPosition")
+                }
+            }
+        }
+
+        // Strategy 3: Read XML from app shared_prefs
+        if (!loaded) {
+            runCatching {
+                val f = java.io.File("/data/user/0/com.cramqin.hyperfps/shared_prefs/hyperfps_prefs.xml")
+                if (f.exists() && f.canRead()) {
+                    applyXmlConfig(f.readText())
+                    loaded = true
+                    Log.i(TAG, "Loaded initial config from app shared_prefs XML: enabled=$isEnabled, pos=$currentPosition")
+                }
+            }
+        }
+
+        // Strategy 4: Xposed RemotePreferences
         runCatching {
             val remotePrefs = module.getRemotePreferences("hyperfps_prefs")
             if (remotePrefs != null) {
-                isEnabled = remotePrefs.getBoolean("statusbar_enabled", false)
-                currentPosition = remotePrefs.getString("statusbar_position", "right") ?: "right"
-                statusBarFontSize = remotePrefs.getFloat("statusbar_font_size", 11f)
-                statusBarBold = remotePrefs.getBoolean("statusbar_bold", true)
-                statusBarMarginLeft = remotePrefs.getInt("statusbar_margin_left", 1)
-                statusBarMarginRight = remotePrefs.getInt("statusbar_margin_right", 1)
-                statusBarVerticalOffset = remotePrefs.getInt("statusbar_vertical_offset", 0)
-                statusBarFont = remotePrefs.getString("statusbar_font", "default") ?: "default"
-                statusBarCustomFontPath = remotePrefs.getString("statusbar_custom_font_path", "") ?: ""
-                if (isEnabled) lastTimestatsEnableTime = 0L
-                Log.i(TAG, "Loaded remote prefs: isEnabled=$isEnabled, pos=$currentPosition, size=$statusBarFontSize, bold=$statusBarBold, font=$statusBarFont")
+                if (remotePrefs.contains("statusbar_enabled")) {
+                    isEnabled = remotePrefs.getBoolean("statusbar_enabled", isEnabled)
+                }
+                currentPosition = remotePrefs.getString("statusbar_position", currentPosition) ?: currentPosition
+                statusBarFontSize = remotePrefs.getFloat("statusbar_font_size", statusBarFontSize)
+                statusBarBold = remotePrefs.getBoolean("statusbar_bold", statusBarBold)
+                statusBarColor = remotePrefs.getString("statusbar_color", statusBarColor) ?: statusBarColor
+                statusBarMarginLeft = remotePrefs.getInt("statusbar_margin_left", statusBarMarginLeft)
+                statusBarMarginRight = remotePrefs.getInt("statusbar_margin_right", statusBarMarginRight)
+                statusBarVerticalOffset = remotePrefs.getInt("statusbar_vertical_offset", statusBarVerticalOffset)
+                statusBarFont = remotePrefs.getString("statusbar_font", statusBarFont) ?: statusBarFont
+                statusBarCustomFontPath = remotePrefs.getString("statusbar_custom_font_path", statusBarCustomFontPath) ?: statusBarCustomFontPath
+                Log.i(TAG, "Merged remotePrefs: enabled=$isEnabled, pos=$currentPosition, col=$statusBarColor")
             }
         }.onFailure {
             Log.w(TAG, "Could not load remote prefs: ${it.message}")
         }
+
+        if (isEnabled) lastTimestatsEnableTime = 0L
+    }
+
+    private fun applyJsonConfig(json: org.json.JSONObject) {
+        isEnabled = json.optBoolean("statusbar_enabled", isEnabled)
+        currentPosition = json.optString("statusbar_position", currentPosition)
+        statusBarFontSize = json.optDouble("statusbar_font_size", statusBarFontSize.toDouble()).toFloat()
+        statusBarBold = json.optBoolean("statusbar_bold", statusBarBold)
+        statusBarColor = json.optString("statusbar_color", statusBarColor)
+        statusBarMarginLeft = json.optInt("statusbar_margin_left", statusBarMarginLeft)
+        statusBarMarginRight = json.optInt("statusbar_margin_right", statusBarMarginRight)
+        statusBarVerticalOffset = json.optInt("statusbar_vertical_offset", statusBarVerticalOffset)
+        statusBarFont = json.optString("statusbar_font", statusBarFont)
+        statusBarCustomFontPath = json.optString("statusbar_custom_font_path", statusBarCustomFontPath)
+    }
+
+    private fun applyXmlConfig(xml: String) {
+        val enabledMatch = Regex("""<boolean name="statusbar_enabled" value="(\w+)" />""").find(xml)
+        if (enabledMatch != null) isEnabled = enabledMatch.groupValues[1].toBoolean()
+
+        val posMatch = Regex("""<string name="statusbar_position">(.*?)</string>""").find(xml)
+        if (posMatch != null) currentPosition = posMatch.groupValues[1]
+
+        val sizeMatch = Regex("""<float name="statusbar_font_size" value="(.*?)" />""").find(xml)
+        if (sizeMatch != null) sizeMatch.groupValues[1].toFloatOrNull()?.let { statusBarFontSize = it }
+
+        val boldMatch = Regex("""<boolean name="statusbar_bold" value="(\w+)" />""").find(xml)
+        if (boldMatch != null) statusBarBold = boldMatch.groupValues[1].toBoolean()
+
+        val colMatch = Regex("""<string name="statusbar_color">(.*?)</string>""").find(xml)
+        if (colMatch != null) statusBarColor = colMatch.groupValues[1]
+
+        val fontMatch = Regex("""<string name="statusbar_font">(.*?)</string>""").find(xml)
+        if (fontMatch != null) statusBarFont = fontMatch.groupValues[1]
     }
 
     private fun setupApplicationHook(module: XposedModule, classLoader: ClassLoader) {
@@ -191,6 +268,7 @@ object StatusBarFpsHook {
                         currentPosition = intent.getStringExtra("position") ?: currentPosition
                         statusBarFontSize = intent.getFloatExtra("font_size", statusBarFontSize)
                         statusBarBold = intent.getBooleanExtra("bold", statusBarBold)
+                        statusBarColor = intent.getStringExtra("color") ?: statusBarColor
                         statusBarMarginLeft = intent.getIntExtra("margin_left", statusBarMarginLeft)
                         statusBarMarginRight = intent.getIntExtra("margin_right", statusBarMarginRight)
                         statusBarVerticalOffset = intent.getIntExtra("vertical_offset", statusBarVerticalOffset)
@@ -199,7 +277,7 @@ object StatusBarFpsHook {
                         if (isEnabled && !prevEnabled) {
                             lastTimestatsEnableTime = 0L
                         }
-                        Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition, size=$statusBarFontSize, bold=$statusBarBold, font=$statusBarFont")
+                        Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition, size=$statusBarFontSize, bold=$statusBarBold, col=$statusBarColor, font=$statusBarFont")
                         applyStyleAndLayout()
                         updateVisibilities()
                     }
@@ -421,6 +499,7 @@ object StatusBarFpsHook {
             typeface = resolveStatusBarTypeface()
             setTextColor(Color.WHITE)
             alpha = 1.0f
+            text = "--"
         }
         val clockStyleId = context.resources.getIdentifier(STYLE_CLOCK, "style", PKG_SYSTEMUI)
         if (clockStyleId != 0) {
@@ -455,6 +534,7 @@ object StatusBarFpsHook {
             lp.rightMargin = rightPx
             tv.layoutParams = lp
         }
+        syncColorWithClock(tv)
         tv.requestLayout()
     }
 
@@ -519,19 +599,30 @@ object StatusBarFpsHook {
 
     private fun syncColorWithClock(view: View, clockView: TextView? = null) {
         val tv = view as? TextView ?: return
-        val clock = clockView ?: findCachedClock(tv)
         tv.typeface = resolveStatusBarTypeface()
+
+        // 1. If explicit solid color is configured and not "auto", enforce it directly
+        if (statusBarColor.isNotBlank() && !statusBarColor.equals("auto", ignoreCase = true)) {
+            val col = runCatching { Color.parseColor(statusBarColor) }.getOrDefault(Color.WHITE)
+            tv.setTextColor(col)
+            tv.alpha = 1.0f
+            return
+        }
+
+        // 2. Adaptive auto color with active clock
+        val clock = clockView ?: findCachedClock(tv)
         if (clock != null) {
             val colors = clock.textColors
+            val curColor = clock.currentTextColor
             if (colors != null) {
                 tv.setTextColor(colors)
+            } else if (curColor != 0) {
+                tv.setTextColor(curColor)
             } else {
-                tv.setTextColor(clock.currentTextColor)
+                tv.setTextColor(Color.WHITE)
             }
             val clockAlpha = clock.alpha
-            if (Math.abs(tv.alpha - clockAlpha) > 0.01f) {
-                tv.alpha = clockAlpha
-            }
+            tv.alpha = if (clockAlpha > 0.1f) clockAlpha else 1.0f
         } else {
             tv.setTextColor(Color.WHITE)
             tv.alpha = 1.0f
@@ -567,10 +658,10 @@ object StatusBarFpsHook {
 
             val container = iconView.parent as? ViewGroup
             var clock = container?.findViewById<TextView>(clockId)
-            if (clock == null) {
+            if (clock == null || clock.width == 0 || clock.alpha < 0.1f) {
                 clock = iconView.rootView?.findViewById<TextView>(clockId)
             }
-            if (clock != null) {
+            if (clock != null && clock.width > 0 && clock.alpha > 0.1f) {
                 val ref = WeakReference(clock)
                 clockCache[iconView] = ref
                 cachedClockRef = ref
@@ -587,10 +678,18 @@ object StatusBarFpsHook {
             for (tv in leftViews) {
                 val show = isEnabled && currentPosition == "left"
                 tv.visibility = if (show) View.VISIBLE else View.GONE
+                if (show) {
+                    syncColorWithClock(tv)
+                    tv.alpha = 1.0f
+                }
             }
             for (tv in rightViews) {
                 val show = isEnabled && currentPosition == "right"
                 tv.visibility = if (show) View.VISIBLE else View.GONE
+                if (show) {
+                    syncColorWithClock(tv)
+                    tv.alpha = 1.0f
+                }
             }
         }
     }
