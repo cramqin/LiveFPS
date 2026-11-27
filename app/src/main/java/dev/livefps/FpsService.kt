@@ -103,6 +103,71 @@ class FpsService : Service() {
 
     private var userPortraitY = -1
     private var userLandscapeY = -1
+    @Volatile private var isUserInteracting = false
+
+    private val insetsDebounceHandler = Handler(Looper.getMainLooper())
+    private val adjustPositionRunnable = Runnable {
+        if (!alive || isUserInteracting) return@Runnable
+        val v = view ?: return@Runnable
+        val lp = v.layoutParams as? WindowManager.LayoutParams ?: return@Runnable
+        val dm = resources.displayMetrics
+        val dp = dm.density
+        val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
+        val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+        val insets = if (Build.VERSION.SDK_INT >= 30) {
+            v.rootWindowInsets ?: wm.currentWindowMetrics.windowInsets
+        } else null
+
+        val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+            insets.isVisible(WindowInsets.Type.statusBars())
+        } else true
+
+        val insetsTop = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+            insets.getInsets(WindowInsets.Type.statusBars()).top
+        } else 0
+
+        val statusBarHeight = if (insetsTop > 0) insetsTop else systemStatusBarHeight
+
+        val bounds = if (Build.VERSION.SDK_INT >= 30) {
+            wm.currentWindowMetrics.bounds
+        } else {
+            val d = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(d)
+            Rect(0, 0, d.widthPixels, d.heightPixels)
+        }
+        val screenW = bounds.width()
+        val screenH = bounds.height()
+        val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
+        val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
+
+        val snugMargin = (statusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val minY = if (isLandscape) {
+            if (isStatusBarVisible) snugMargin else 0
+        } else {
+            snugMargin
+        }
+
+        val maxX = (screenW - width).coerceAtLeast(0)
+        val maxY = (screenH - height).coerceAtLeast(minY)
+
+        val targetX = lp.x.coerceIn(0, maxX)
+        val targetY = if (isLandscape) {
+            val preferred = if (userLandscapeY >= 0) userLandscapeY else minY
+            preferred.coerceIn(minY, maxY)
+        } else {
+            val preferred = if (userPortraitY >= 0) userPortraitY else snugMargin
+            preferred.coerceIn(minY, maxY)
+        }
+
+        if (lp.x != targetX || lp.y != targetY) {
+            lp.x = targetX
+            lp.y = targetY
+            runCatching { wm.updateViewLayout(v, lp) }
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -181,6 +246,7 @@ class FpsService : Service() {
         synchronized(pauseLock) {
             pauseLock.notifyAll()
         }
+        insetsDebounceHandler.removeCallbacks(adjustPositionRunnable)
         worker?.interrupt()
         view?.let { runCatching { wm.removeView(it) } }
         view = null
@@ -220,14 +286,26 @@ class FpsService : Service() {
 
         val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
         val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
-        val portraitMinY = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+        val snugMargin = (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
 
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val isStatusBarVisible = if (Build.VERSION.SDK_INT >= 30) {
+            wm.currentWindowMetrics.windowInsets.isVisible(WindowInsets.Type.statusBars())
+        } else true
+        val initialMinY = if (isLandscape) {
+            if (isStatusBarVisible) snugMargin else 0
+        } else {
+            snugMargin
+        }
 
-        if (userPortraitY < 0) userPortraitY = portraitMinY
-        if (userLandscapeY < 0) userLandscapeY = 0
+        if (userPortraitY < 0) userPortraitY = snugMargin
+        if (userLandscapeY < 0) userLandscapeY = initialMinY
 
-        val initialY = if (isLandscape) userLandscapeY else userPortraitY
+        val initialY = if (isLandscape) {
+            userLandscapeY.coerceAtLeast(initialMinY)
+        } else {
+            userPortraitY.coerceAtLeast(initialMinY)
+        }
 
         val tv = TextView(this).apply {
             text = "-- fps"
@@ -263,6 +341,8 @@ class FpsService : Service() {
         tv.setOnTouchListener { v, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    isUserInteracting = true
+                    insetsDebounceHandler.removeCallbacks(adjustPositionRunnable)
                     startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -280,16 +360,23 @@ class FpsService : Service() {
                     val screenW = bounds.width()
                     val screenH = bounds.height()
 
+                    val insets = if (Build.VERSION.SDK_INT >= 30) {
+                        v.rootWindowInsets ?: wm.currentWindowMetrics.windowInsets
+                    } else null
+                    val isStatusBarVisibleNow = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+                        insets.isVisible(WindowInsets.Type.statusBars())
+                    } else true
+                    val insetsTop = if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+                        insets.getInsets(WindowInsets.Type.statusBars()).top
+                    } else 0
+                    val currentStatusBarH = if (insetsTop > 0) insetsTop else systemStatusBarHeight
+                    val currentSnugMargin = (currentStatusBarH - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+
                     val isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
                     val minY = if (isLandscapeNow) {
-                        val statusBarTop = if (Build.VERSION.SDK_INT >= 30) {
-                            val insets = wm.currentWindowMetrics.windowInsets
-                            val isVisible = insets.isVisible(WindowInsets.Type.statusBars())
-                            if (isVisible) insets.getInsets(WindowInsets.Type.statusBars()).top else 0
-                        } else 0
-                        if (statusBarTop > 0) statusBarTop + (4 * dp).toInt() else 0
+                        if (isStatusBarVisibleNow) currentSnugMargin else 0
                     } else {
-                        (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
+                        currentSnugMargin
                     }
                     val maxX = (screenW - width).coerceAtLeast(0)
                     val maxY = (screenH - height).coerceAtLeast(minY)
@@ -302,15 +389,24 @@ class FpsService : Service() {
                     wm.updateViewLayout(v, lp)
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    isUserInteracting = false
                     val isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
                     if (isLandscapeNow) {
                         userLandscapeY = lp.y
                     } else {
                         userPortraitY = lp.y
                     }
+                    insetsDebounceHandler.removeCallbacks(adjustPositionRunnable)
+                    insetsDebounceHandler.postDelayed(adjustPositionRunnable, 150L)
                 }
             }
             true
+        }
+
+        tv.setOnApplyWindowInsetsListener { _, insets ->
+            insetsDebounceHandler.removeCallbacks(adjustPositionRunnable)
+            insetsDebounceHandler.postDelayed(adjustPositionRunnable, 150L)
+            insets
         }
 
         wm.addView(tv, lp)
@@ -319,51 +415,8 @@ class FpsService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        view?.let { v ->
-            val dm = resources.displayMetrics
-            val dp = dm.density
-            val lp = v.layoutParams as? WindowManager.LayoutParams ?: return
-            val width = v.width.takeIf { it > 0 } ?: (60 * dp).toInt()
-            val height = v.height.takeIf { it > 0 } ?: (30 * dp).toInt()
-            val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-            val systemStatusBarHeight = if (resId > 0) resources.getDimensionPixelSize(resId) else (28 * dp).toInt()
-
-            val bounds = if (Build.VERSION.SDK_INT >= 30) {
-                wm.currentWindowMetrics.bounds
-            } else {
-                val d = DisplayMetrics()
-                @Suppress("DEPRECATION")
-                wm.defaultDisplay.getRealMetrics(d)
-                Rect(0, 0, d.widthPixels, d.heightPixels)
-            }
-            val screenWidth = bounds.width()
-            val screenHeight = bounds.height()
-
-            val isLandscape = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
-            val minY = if (isLandscape) {
-                val statusBarTop = if (Build.VERSION.SDK_INT >= 30) {
-                    val insets = wm.currentWindowMetrics.windowInsets
-                    val isVisible = insets.isVisible(WindowInsets.Type.statusBars())
-                    if (isVisible) insets.getInsets(WindowInsets.Type.statusBars()).top else 0
-                } else 0
-                if (statusBarTop > 0) statusBarTop + (4 * dp).toInt() else 0
-            } else {
-                (systemStatusBarHeight - (10 * dp).toInt()).coerceAtLeast((24 * dp).toInt())
-            }
-
-            val maxX = (screenWidth - width).coerceAtLeast(0)
-            val maxY = (screenHeight - height).coerceAtLeast(minY)
-
-            val targetY = if (isLandscape) {
-                if (userLandscapeY >= 0) userLandscapeY.coerceIn(minY, maxY) else minY
-            } else {
-                if (userPortraitY >= 0) userPortraitY.coerceIn(minY, maxY) else minY
-            }
-
-            lp.x = lp.x.coerceIn(0, maxX)
-            lp.y = targetY
-            runCatching { wm.updateViewLayout(v, lp) }
-        }
+        insetsDebounceHandler.removeCallbacks(adjustPositionRunnable)
+        insetsDebounceHandler.postDelayed(adjustPositionRunnable, 150L)
     }
 
     private fun startWorker() {
@@ -443,6 +496,9 @@ class FpsService : Service() {
                     FpsState.currentLabel = label
                     mainHandler.post {
                         FpsState.listener?.invoke(fpsVal, label)
+                        if (!isUserInteracting) {
+                            adjustPositionRunnable.run()
+                        }
                     }
 
                     if (currentFrames != null && fpsVal != null) {
