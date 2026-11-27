@@ -319,17 +319,23 @@ object StatusBarFpsHook {
                 hookMethod(module, m) { chain ->
                     val res = chain.proceed()
                     val controller = chain.thisObject
+                    val statusBarView = (getField(controller, "mView") as? ViewGroup)
+                        ?: (getField(controller, "phoneStatusBarView") as? ViewGroup)
+                        ?: (chain.thisObject as? ViewGroup)
                     val clockView = (getField(controller, "clock") as? View) ?: (getField(controller, FIELD_M_CLOCK_VIEW) as? View)
                     val startSide = getField(controller, "startSideContainer") as? ViewGroup
                     val endSide = getField(controller, "endSideContainer") as? ViewGroup
-                    val context = clockView?.context ?: startSide?.context ?: endSide?.context
+                    val context = statusBarView?.context ?: clockView?.context ?: startSide?.context ?: endSide?.context
 
                     if (context != null) {
                         registerReceiverWithContext(context)
-                        val leftContainer = startSide ?: (clockView?.parent as? ViewGroup)
-                        injectToLeftContainer(leftViews, context, leftContainer, clockView)
+                        val resIds = context.resources
+                        val clockId = resIds.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
+                        val resolvedClock = clockView ?: if (clockId != 0 && statusBarView != null) statusBarView.findViewById(clockId) else null
+                        val leftContainer = startSide ?: (resolvedClock?.parent as? ViewGroup)
+                        injectToLeftContainer(leftViews, context, leftContainer, resolvedClock)
 
-                        val statusBarScope = (leftContainer?.parent as? View) ?: leftContainer?.rootView ?: endSide?.rootView
+                        val statusBarScope = statusBarView ?: (leftContainer?.parent as? View) ?: leftContainer?.rootView ?: endSide?.rootView
                         val (rightContainer, anchorChild) = resolveRightTarget(statusBarScope, context, endSide)
                         injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
@@ -364,15 +370,15 @@ object StatusBarFpsHook {
             }
         }
 
-        // 3. MiuiPhoneStatusBarView / PhoneStatusBarView
+        // 3. MiuiPhoneStatusBarView / PhoneStatusBarView constructors and inflate
         for (vName in listOf("com.android.systemui.statusbar.phone.MiuiPhoneStatusBarView", "com.android.systemui.statusbar.phone.PhoneStatusBarView")) {
             val vCls = findClass(vName, classLoader) ?: continue
-            for (m in vCls.declaredMethods.filter { (it.name == "onFinishInflate" || it.name == "onAttachedToWindow") && it.parameterTypes.isEmpty() }) {
-                hookMethod(module, m) { chain ->
+            for (ctor in vCls.declaredConstructors) {
+                hookMethod(module, ctor) { chain ->
                     val res = chain.proceed()
-                    val view = chain.thisObject as? ViewGroup
-                    if (view != null) {
-                        val context = view.context
+                    val view = chain.thisObject as? ViewGroup ?: return@hookMethod res
+                    view.post {
+                        val context = view.context ?: return@post
                         registerReceiverWithContext(context)
                         val resIds = context.resources
                         val clockId = resIds.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
@@ -380,8 +386,7 @@ object StatusBarFpsHook {
                         val leftContainer = clockView?.parent as? ViewGroup
                         injectToLeftContainer(leftViews, context, leftContainer, clockView)
 
-                        val statusBarScope = (leftContainer?.parent as? View) ?: view
-                        val (rightContainer, anchorChild) = resolveRightTarget(statusBarScope, context, null)
+                        val (rightContainer, anchorChild) = resolveRightTarget(view, context, null)
                         injectToRightContainer(rightViews, context, rightContainer, anchorChild)
                     }
                     res
@@ -397,22 +402,19 @@ object StatusBarFpsHook {
     ): Pair<ViewGroup?, View?> {
         val res = context.resources
 
-        // 1. Main HyperOS status bar: status_icon_area (LinearLayout) -> system_icons_container (MiuiStatusBatteryContainer)
+        // 1. Main HyperOS status bar: status_icon_area (LinearLayout).
+        // Return null as anchorChild so it appends to the end of status_icon_area (right side of status bar, away from center camera punch hole)
         val statusIconAreaId = res.getIdentifier("status_icon_area", "id", PKG_SYSTEMUI)
-        val sysIconsContainerId = res.getIdentifier("system_icons_container", "id", PKG_SYSTEMUI)
         val statusIconArea = if (statusIconAreaId != 0) scopeView?.findViewById<ViewGroup>(statusIconAreaId) else null
-        val sysIconsContainer = if (sysIconsContainerId != 0) scopeView?.findViewById<View>(sysIconsContainerId) else null
         if (statusIconArea != null) {
-            return Pair(statusIconArea, sysIconsContainer)
+            return Pair(statusIconArea, null)
         }
 
-        // 2. Alternate status bar layout: status_icons_container -> system_icon_area
+        // 2. Alternate status bar layout: status_icons_container
         val statusIconsContainerId = res.getIdentifier("status_icons_container", "id", PKG_SYSTEMUI)
-        val systemIconAreaId = res.getIdentifier("system_icon_area", "id", PKG_SYSTEMUI)
         val statusIconsContainer = if (statusIconsContainerId != 0) scopeView?.findViewById<ViewGroup>(statusIconsContainerId) else null
-        val systemIconArea = if (systemIconAreaId != 0) scopeView?.findViewById<View>(systemIconAreaId) else null
         if (statusIconsContainer != null) {
-            return Pair(statusIconsContainer, systemIconArea)
+            return Pair(statusIconsContainer, null)
         }
 
         // 3. Fallback via battery view: walk above MiuiStatusBatteryContainer into its LinearLayout parent
@@ -423,10 +425,10 @@ object StatusBarFpsHook {
             if (batteryParent.javaClass.simpleName.contains("BatteryContainer") || batteryParent !is LinearLayout) {
                 val grandParent = batteryParent.parent as? ViewGroup
                 if (grandParent != null) {
-                    return Pair(grandParent, batteryParent)
+                    return Pair(grandParent, null)
                 }
             }
-            return Pair(batteryParent, batteryView)
+            return Pair(batteryParent, null)
         }
 
         return Pair(fallbackEndSide, null)
@@ -481,7 +483,7 @@ object StatusBarFpsHook {
         val index = if (anchorChild != null && anchorChild.parent === container) {
             container.indexOfChild(anchorChild).coerceIn(0, container.childCount)
         } else {
-            0
+            container.childCount
         }
         container.addView(fpsView, index)
         targetList.add(fpsView)
@@ -492,6 +494,7 @@ object StatusBarFpsHook {
 
     private fun createFpsTextView(context: Context, lp: ViewGroup.LayoutParams): TextView {
         val tv = TextView(context).apply {
+            id = View.generateViewId()
             layoutParams = lp
             gravity = Gravity.CENTER
             isSingleLine = true
@@ -570,6 +573,11 @@ object StatusBarFpsHook {
 
     private fun ensureInjectedFromClock(clock: TextView) {
         if (!clock.isAttachedToWindow) return
+        val p = clock.parent as? View
+        val pName = p?.javaClass?.name ?: ""
+        if (pName.contains("Header") || pName.contains("QS") || pName.contains("ConstraintLayout") || pName.contains("carrier", ignoreCase = true)) {
+            return
+        }
         val context = clock.context ?: return
         registerReceiverWithContext(context)
 
