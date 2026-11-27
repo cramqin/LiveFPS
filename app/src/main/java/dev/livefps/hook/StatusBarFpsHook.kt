@@ -314,10 +314,10 @@ object StatusBarFpsHook {
 
     private fun registerIconToController(iconController: Any, classLoader: ClassLoader) {
         runCatching {
-            callMethod(iconController, METHOD_SET_ICON, arrayOf(String::class.java, Int::class.javaPrimitiveType), arrayOf(SLOT_NAME, 0))
+            callMethod(iconController, METHOD_SET_ICON, SLOT_NAME, 0)
         }.onFailure {
             runCatching {
-                val slotIndex = callMethod(iconController, METHOD_GET_SLOT_INDEX, arrayOf(String::class.java), arrayOf(SLOT_NAME)) as? Int ?: 0
+                val slotIndex = callMethod(iconController, METHOD_GET_SLOT_INDEX, SLOT_NAME) as? Int ?: 0
                 val sbHolderCls = findClass("com.android.systemui.statusbar.phone.StatusBarIconHolder", classLoader)
                 if (sbHolderCls != null) {
                     val ctor = sbHolderCls.declaredConstructors.firstOrNull { it.parameterTypes.isEmpty() } ?: sbHolderCls.declaredConstructors.first()
@@ -325,7 +325,7 @@ object StatusBarFpsHook {
                     val holder = ctor.newInstance()
                     setField(holder, FIELD_TYPE, ICON_TYPE)
                     setField(holder, FIELD_M_TYPE, ICON_TYPE)
-                    callMethod(iconController, METHOD_SET_ICON, arrayOf(Int::class.javaPrimitiveType, sbHolderCls), arrayOf(slotIndex, holder))
+                    callMethod(iconController, METHOD_SET_ICON, slotIndex, holder)
                 }
             }
         }
@@ -433,7 +433,7 @@ object StatusBarFpsHook {
 
         if (darkDispatcher != null) {
             runCatching {
-                callMethod(darkDispatcher, METHOD_ADD_DARK_RECEIVER, arrayOf(View::class.java), arrayOf(iconView))
+                callMethod(darkDispatcher, METHOD_ADD_DARK_RECEIVER, iconView)
             }
         }
         updateVisibilities()
@@ -499,7 +499,7 @@ object StatusBarFpsHook {
         fromController: Boolean
     ) {
         if (!fromController) {
-            runCatching { callMethod(iconView, METHOD_SET_BLOCKED, arrayOf(Boolean::class.javaPrimitiveType), arrayOf(false)) }
+            runCatching { callMethod(iconView, METHOD_SET_BLOCKED, false) }
         }
         val iconTextView = (getField(iconView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView)
             ?: (iconView as? TextView) ?: return
@@ -584,7 +584,7 @@ object StatusBarFpsHook {
             for (tv in leftViews) {
                 val show = isEnabled && currentPosition == "left"
                 runCatching {
-                    callMethod(tv, METHOD_SET_VISIBILITY_BY_CONTROLLER, arrayOf(Boolean::class.javaPrimitiveType), arrayOf(show))
+                    callMethod(tv, METHOD_SET_VISIBILITY_BY_CONTROLLER, show)
                 }.onFailure {
                     tv.visibility = if (show) View.VISIBLE else View.GONE
                 }
@@ -592,7 +592,7 @@ object StatusBarFpsHook {
             for (tv in rightViews) {
                 val show = isEnabled && currentPosition == "right"
                 runCatching {
-                    callMethod(tv, METHOD_SET_VISIBILITY_BY_CONTROLLER, arrayOf(Boolean::class.javaPrimitiveType), arrayOf(show))
+                    callMethod(tv, METHOD_SET_VISIBILITY_BY_CONTROLLER, show)
                 }.onFailure {
                     tv.visibility = if (show) View.VISIBLE else View.GONE
                 }
@@ -604,7 +604,7 @@ object StatusBarFpsHook {
         val activeList = if (currentPosition == "left") leftViews else rightViews
         for (tv in activeList) {
             runCatching {
-                callMethod(tv, METHOD_SET_NETWORK_SPEED, arrayOf(String::class.java, String::class.java), arrayOf(fpsText, ""))
+                callMethod(tv, METHOD_SET_NETWORK_SPEED, fpsText, "")
             }.onFailure {
                 val num = (getField(tv, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (tv as? TextView)
                 num?.text = fpsText
@@ -744,13 +744,14 @@ object StatusBarFpsHook {
     private fun callMethod(
         obj: Any,
         methodName: String,
-        paramTypes: Array<Class<*>> = emptyArray(),
-        args: Array<Any?> = emptyArray()
+        vararg args: Any?
     ): Any? {
         var cls: Class<*>? = obj.javaClass
         while (cls != null && cls != Any::class.java) {
-            val m = runCatching { cls.getDeclaredMethod(methodName, *paramTypes).apply { isAccessible = true } }.getOrNull()
-            if (m != null) return m.invoke(obj, *args)
+            val m = runCatching {
+                cls.declaredMethods.firstOrNull { it.name == methodName && it.parameterTypes.size == args.size }?.apply { isAccessible = true }
+            }.getOrNull()
+            if (m != null) return runCatching { m.invoke(obj, *args) }.getOrNull()
             cls = cls.superclass
         }
         return null
