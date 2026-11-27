@@ -374,9 +374,9 @@ object StatusBarFpsHook {
         for (vName in listOf("com.android.systemui.statusbar.phone.MiuiPhoneStatusBarView", "com.android.systemui.statusbar.phone.PhoneStatusBarView")) {
             val vCls = findClass(vName, classLoader) ?: continue
             for (ctor in vCls.declaredConstructors) {
-                hookMethod(module, ctor) { chain ->
+                hookConstructor(module, ctor) { chain ->
                     val res = chain.proceed()
-                    val view = chain.thisObject as? ViewGroup ?: return@hookMethod res
+                    val view = chain.thisObject as? ViewGroup ?: return@hookConstructor res
                     view.post {
                         val context = view.context ?: return@post
                         registerReceiverWithContext(context)
@@ -573,7 +573,7 @@ object StatusBarFpsHook {
 
     private fun ensureInjectedFromClock(clock: TextView) {
         if (!clock.isAttachedToWindow) return
-        val p = clock.parent as? View
+        var p = clock.parent as? View
         val pName = p?.javaClass?.name ?: ""
         if (pName.contains("Header") || pName.contains("QS") || pName.contains("ConstraintLayout") || pName.contains("carrier", ignoreCase = true)) {
             return
@@ -581,7 +581,6 @@ object StatusBarFpsHook {
         val context = clock.context ?: return
         registerReceiverWithContext(context)
 
-        var p: View? = clock.parent as? View
         var scope: View? = null
         for (i in 0 until 4) {
             if (p == null) break
@@ -822,6 +821,21 @@ object StatusBarFpsHook {
             }
         }.onFailure {
             Log.w(TAG, "Failed hooking method ${method.declaringClass.name}#${method.name}: ${it.message}")
+        }
+    }
+
+    private fun hookConstructor(
+        module: XposedModule,
+        constructor: java.lang.reflect.Constructor<*>,
+        callback: (chain: XposedInterface.Chain) -> Any?
+    ) {
+        runCatching {
+            constructor.isAccessible = true
+            module.hook(constructor).intercept { chain ->
+                callback(chain)
+            }
+        }.onFailure {
+            Log.w(TAG, "Failed hooking constructor ${constructor.declaringClass.name}: ${it.message}")
         }
     }
 
