@@ -80,6 +80,7 @@ object StatusBarFpsHook {
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var lastTimestatsEnableTime = 0L
 
     private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
 
@@ -102,13 +103,16 @@ object StatusBarFpsHook {
         // 4. Setup NetworkSpeedView hook behaviors (getSlot, setVisibleState, dark tint)
         setupNetworkSpeedViewHooks(module, nsvCls)
 
-        // 5. Setup Status Bar containers (Left near clock & Right near battery)
-        setupStatusBarContainers(module, nsvCls, classLoader)
+        // 5. Setup Status Bar containers (Left near clock)
+        setupStatusBarLeftContainers(module, nsvCls, classLoader)
 
-        // 6. Setup MiuiClock color sync
+        // 6. Setup Status Bar right container via IconManager (placed directly to left of HyperCeiler)
+        setupIconManagerHooks(module, nsvCls, classLoader)
+
+        // 7. Setup MiuiClock color sync
         setupClockColorSync(module, classLoader)
 
-        // 7. Start background sampling worker (fixed 2.0s interval)
+        // 8. Start background sampling worker (fixed 2.0s interval, autonomous timestats)
         startSamplingWorker()
     }
 
@@ -118,6 +122,7 @@ object StatusBarFpsHook {
             if (remotePrefs != null) {
                 isEnabled = remotePrefs.getBoolean("statusbar_enabled", false)
                 currentPosition = remotePrefs.getString("statusbar_position", "right") ?: "right"
+                if (isEnabled) lastTimestatsEnableTime = 0L
                 Log.i(TAG, "Loaded remote prefs: isEnabled=$isEnabled, pos=$currentPosition")
             }
         }.onFailure {
@@ -143,8 +148,12 @@ object StatusBarFpsHook {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 if (intent?.action == ACTION_CONFIG_CHANGED) {
+                    val prevEnabled = isEnabled
                     isEnabled = intent.getBooleanExtra("enabled", isEnabled)
                     currentPosition = intent.getStringExtra("position") ?: currentPosition
+                    if (isEnabled && !prevEnabled) {
+                        lastTimestatsEnableTime = 0L
+                    }
                     Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
                     updateVisibilities()
                 }
@@ -205,7 +214,7 @@ object StatusBarFpsHook {
         }
     }
 
-    private fun setupStatusBarContainers(module: XposedModule, nsvCls: Class<*>, classLoader: ClassLoader) {
+    private fun setupStatusBarLeftContainers(module: XposedModule, nsvCls: Class<*>, classLoader: ClassLoader) {
         // 1. PhoneStatusBarViewController.onViewAttached
         val controllerCls = findClass("com.android.systemui.statusbar.phone.PhoneStatusBarViewController", classLoader)
         if (controllerCls != null) {
@@ -214,21 +223,14 @@ object StatusBarFpsHook {
                     val res = chain.proceed()
                     val controller = chain.thisObject
                     val clockView = (getField(controller, "clock") as? View) ?: (getField(controller, FIELD_M_CLOCK_VIEW) as? View)
-                    val batteryView = getField(controller, "battery") as? View
                     val startSide = getField(controller, "startSideContainer") as? ViewGroup
-                    val endSide = getField(controller, "endSideContainer") as? ViewGroup
                     val darkDispatcher = getField(controller, "darkIconDispatcher")
-                    val context = clockView?.context ?: startSide?.context ?: batteryView?.context ?: endSide?.context
+                    val context = clockView?.context ?: startSide?.context
 
                     if (context != null) {
                         registerReceiverWithContext(context)
-                        // Left side near clock
                         val leftContainer = startSide ?: (clockView?.parent as? ViewGroup)
-                        injectToContainer(leftViews, nsvCls, context, leftContainer, clockView, darkDispatcher, classLoader, TAG_LEFT, true)
-
-                        // Right side near battery
-                        val rightContainer = endSide ?: (batteryView?.parent as? ViewGroup)
-                        injectToContainer(rightViews, nsvCls, context, rightContainer, batteryView, darkDispatcher, classLoader, TAG_RIGHT, false)
+                        injectToLeftContainer(leftViews, nsvCls, context, leftContainer, clockView, darkDispatcher, classLoader)
                     }
                     res
                 }
@@ -249,16 +251,8 @@ object StatusBarFpsHook {
                         val resIds = context.resources
                         val clockId = resIds.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
                         val clockView = (getField(fragment, FIELD_M_CLOCK_VIEW) as? View) ?: if (clockId != 0 && rootView != null) rootView.findViewById(clockId) else null
-                        val batteryId = resIds.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
-                        val batteryView = if (batteryId != 0 && rootView != null) rootView.findViewById<View>(batteryId) else null
-
-                        // Left
                         val leftContainer = clockView?.parent as? ViewGroup
-                        injectToContainer(leftViews, nsvCls, context, leftContainer, clockView, null, classLoader, TAG_LEFT, true)
-
-                        // Right
-                        val rightContainer = (batteryView?.parent as? ViewGroup) ?: (rootView as? ViewGroup)?.let { findRightContainer(it) }
-                        injectToContainer(rightViews, nsvCls, context, rightContainer, batteryView, null, classLoader, TAG_RIGHT, false)
+                        injectToLeftContainer(leftViews, nsvCls, context, leftContainer, clockView, null, classLoader)
                     }
                     res
                 }
@@ -278,16 +272,8 @@ object StatusBarFpsHook {
                         val resIds = context.resources
                         val clockId = resIds.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
                         val clockView = if (clockId != 0) view.findViewById<View>(clockId) else null
-                        val batteryId = resIds.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
-                        val batteryView = if (batteryId != 0) view.findViewById<View>(batteryId) else null
-
-                        // Left
                         val leftContainer = clockView?.parent as? ViewGroup
-                        injectToContainer(leftViews, nsvCls, context, leftContainer, clockView, null, classLoader, TAG_LEFT, true)
-
-                        // Right
-                        val rightContainer = findRightContainer(view) ?: (batteryView?.parent as? ViewGroup)
-                        injectToContainer(rightViews, nsvCls, context, rightContainer, batteryView, null, classLoader, TAG_RIGHT, false)
+                        injectToLeftContainer(leftViews, nsvCls, context, leftContainer, clockView, null, classLoader)
                     }
                     res
                 }
@@ -295,34 +281,17 @@ object StatusBarFpsHook {
         }
     }
 
-    private fun findRightContainer(root: ViewGroup): ViewGroup? {
-        val sysAreaField = getField(root, "mSystemIconArea") as? ViewGroup
-        if (sysAreaField != null) return sysAreaField
-
-        val res = root.resources
-        for (name in listOf("end_side_container", "system_icons", "system_icon_area", "status_bar_icons", "statusIcons")) {
-            val id = res.getIdentifier(name, "id", PKG_SYSTEMUI)
-            if (id != 0) {
-                val v = root.findViewById<ViewGroup>(id)
-                if (v != null) return v
-            }
-        }
-        return null
-    }
-
-    private fun injectToContainer(
+    private fun injectToLeftContainer(
         targetList: CopyOnWriteArrayList<View>,
         nsvCls: Class<*>,
         context: Context,
         targetContainer: ViewGroup?,
-        anchorView: View?,
+        clockView: View?,
         providedDarkDispatcher: Any?,
-        classLoader: ClassLoader,
-        viewTag: String,
-        isLeft: Boolean
+        classLoader: ClassLoader
     ) {
         val container = targetContainer ?: return
-        val existing = container.findViewWithTag<View>(viewTag)
+        val existing = container.findViewWithTag<View>(TAG_LEFT)
         if (existing != null) {
             if (!targetList.contains(existing)) targetList.add(existing)
             syncColorWithClock(existing)
@@ -330,21 +299,17 @@ object StatusBarFpsHook {
         }
 
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        val iconView = createStatusbarTextIcon(nsvCls, context, lp).apply { tag = viewTag }
+        val iconView = createStatusbarTextIcon(nsvCls, context, lp).apply { tag = TAG_LEFT }
 
-        val index = if (anchorView != null && anchorView.parent === container) {
-            if (isLeft) {
-                (container.indexOfChild(anchorView) + 1).coerceIn(0, container.childCount) // after clock
-            } else {
-                container.indexOfChild(anchorView).coerceIn(0, container.childCount) // right before battery
-            }
+        val index = if (clockView != null && clockView.parent === container) {
+            (container.indexOfChild(clockView) + 1).coerceIn(0, container.childCount)
         } else {
-            if (isLeft) container.childCount else 0
+            container.childCount
         }
         container.addView(iconView, index)
         targetList.add(iconView)
         syncColorWithClock(iconView)
-        Log.i(TAG, "Injected $viewTag into container $container at index $index")
+        Log.i(TAG, "Injected $TAG_LEFT into left container $container at index $index")
 
         val darkDispatcher = providedDarkDispatcher ?: runCatching {
             val darkCls = findClass("com.android.systemui.plugins.DarkIconDispatcher", classLoader)
@@ -355,11 +320,114 @@ object StatusBarFpsHook {
         }.getOrNull()
 
         if (darkDispatcher != null) {
-            runCatching {
-                callMethod(darkDispatcher, METHOD_ADD_DARK_RECEIVER, iconView)
-            }
+            runCatching { callMethod(darkDispatcher, METHOD_ADD_DARK_RECEIVER, iconView) }
         }
         updateVisibilities()
+    }
+
+    private fun setupIconManagerHooks(module: XposedModule, nsvCls: Class<*>, classLoader: ClassLoader) {
+        val iconManagerClasses = listOf(
+            "com.android.systemui.statusbar.phone.ui.IconManager",
+            "com.android.systemui.statusbar.phone.StatusBarIconController\$IconManager"
+        )
+
+        for (clsName in iconManagerClasses) {
+            val imCls = findClass(clsName, classLoader) ?: continue
+            Log.i(TAG, "Found IconManager class: $clsName")
+
+            // 1. Hook constructors
+            for (ctor in imCls.declaredConstructors) {
+                runCatching {
+                    ctor.isAccessible = true
+                    module.hook(ctor).intercept { chain ->
+                        val res = chain.proceed()
+                        attachRightFpsToIconManager(chain.thisObject, nsvCls, classLoader)
+                        res
+                    }
+                }
+            }
+
+            // 2. Hook onIconAdded & addHolder
+            for (mName in listOf("onIconAdded", "addHolder")) {
+                for (m in imCls.declaredMethods.filter { it.name == mName }) {
+                    hookMethod(module, m) { chain ->
+                        val res = chain.proceed()
+                        attachRightFpsToIconManager(chain.thisObject, nsvCls, classLoader)
+                        res
+                    }
+                }
+            }
+        }
+    }
+
+    private fun attachRightFpsToIconManager(iconManager: Any, nsvCls: Class<*>, classLoader: ClassLoader) {
+        val group = getField(iconManager, "mGroup") as? ViewGroup ?: return
+        val location = getField(iconManager, "mLocation")
+        // Exclude Quick Settings / Control Center icon manager
+        if (location != null && location.toString().contains("QS")) return
+
+        val context = group.context ?: return
+        registerReceiverWithContext(context)
+
+        var fpsView = group.findViewWithTag<View>(TAG_RIGHT)
+        if (fpsView == null) {
+            val lp = (callMethod(iconManager, "onCreateLayoutParams") as? ViewGroup.LayoutParams)
+                ?: LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            fpsView = createStatusbarTextIcon(nsvCls, context, lp).apply { tag = TAG_RIGHT }
+            val targetIndex = computeRightTargetIndex(group, null)
+            group.addView(fpsView, targetIndex)
+            if (!rightViews.contains(fpsView)) rightViews.add(fpsView)
+            Log.i(TAG, "Attached LiveFPS to IconManager.mGroup at index $targetIndex of ${group.childCount}")
+
+            runCatching {
+                val darkCls = findClass("com.android.systemui.plugins.DarkIconDispatcher", classLoader)
+                val depCls = findClass("com.android.systemui.Dependency", classLoader)
+                if (darkCls != null && depCls != null) {
+                    val darkDispatcher = depCls.getMethod("get", Class::class.java).invoke(null, darkCls)
+                    if (darkDispatcher != null) {
+                        callMethod(darkDispatcher, METHOD_ADD_DARK_RECEIVER, fpsView)
+                    }
+                }
+            }
+        } else {
+            if (!rightViews.contains(fpsView)) rightViews.add(fpsView)
+            val currentIdx = group.indexOfChild(fpsView)
+            val expectedIdx = computeRightTargetIndex(group, fpsView)
+            if (expectedIdx != -1 && currentIdx != expectedIdx) {
+                group.removeView(fpsView)
+                val newTarget = computeRightTargetIndex(group, null)
+                group.addView(fpsView, newTarget.coerceIn(0, group.childCount))
+                Log.i(TAG, "Re-aligned LiveFPS in IconManager.mGroup from $currentIdx to $newTarget")
+            }
+        }
+
+        syncColorWithClock(fpsView)
+        updateVisibilities()
+    }
+
+    private fun computeRightTargetIndex(group: ViewGroup, selfView: View? = null): Int {
+        // 1. HyperCeiler battery info view uses tag "slot_text_icon"
+        val hyperView = group.findViewWithTag<View>("slot_text_icon")
+        if (hyperView != null) {
+            val hIdx = group.indexOfChild(hyperView)
+            return if (selfView != null && group.indexOfChild(selfView) < hIdx) {
+                hIdx - 1
+            } else {
+                hIdx
+            }
+        }
+
+        // 2. Fallback: place right after network_speed view if present
+        for (i in 0 until group.childCount) {
+            val c = group.getChildAt(i)
+            if (c !== selfView && (c.tag == "network_speed" || c.javaClass.simpleName == "NetworkSpeedView")) {
+                val netIdx = group.indexOfChild(c)
+                return if (selfView != null && group.indexOfChild(selfView) <= netIdx) netIdx else netIdx + 1
+            }
+        }
+
+        // 3. Fallback: beginning of mGroup (index 0)
+        return 0
     }
 
     private fun createStatusbarTextIcon(
@@ -547,6 +615,8 @@ object StatusBarFpsHook {
                     return
                 }
 
+                ensureTimestatsEnabled()
+
                 try {
                     val currentFrames = readTotalFrames()
                     val now = SystemClock.elapsedRealtimeNanos()
@@ -569,6 +639,16 @@ object StatusBarFpsHook {
             }
         }
         workerHandler?.sendEmptyMessage(MSG_WORKER_TICK)
+    }
+
+    private fun ensureTimestatsEnabled() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastTimestatsEnableTime > 20000L) {
+            lastTimestatsEnableTime = now
+            runCatching {
+                ProcessBuilder("dumpsys", "SurfaceFlinger", "--timestats", "-enable").start().waitFor()
+            }
+        }
     }
 
     private fun readTotalFrames(): Long? {

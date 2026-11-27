@@ -410,15 +410,12 @@ class FpsService : Service() {
                 while (alive) {
                     // Battery Saver: If screen is turned off, pause polling completely
                     if (!screenOn) {
-                        sh("dumpsys SurfaceFlinger --timestats -disable >/dev/null 2>&1")
                         synchronized(pauseLock) {
                             while (!screenOn && alive) {
                                 pauseLock.wait()
                             }
                         }
                         if (!alive) break
-                        // Resumed after screen on: re-enable and reset timestamp
-                        sh("dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1")
                         lastTime = SystemClock.elapsedRealtimeNanos()
                         lastFrames = -1L
                     }
@@ -467,9 +464,8 @@ class FpsService : Service() {
                     FpsState.listener?.invoke(null, errLabel)
                 }
             } finally {
-                // Leave SurfaceFlinger the way we found it.
                 runCatching {
-                    w?.write("dumpsys SurfaceFlinger --timestats -disable >/dev/null 2>&1\nexit\n")
+                    w?.write("exit\n")
                     w?.flush()
                     proc?.waitFor()
                 }
