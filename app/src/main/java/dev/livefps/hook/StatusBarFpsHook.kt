@@ -28,50 +28,44 @@ import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * SystemUI Hook (libxposed API 102) matching HyperCeiler's architecture:
+ * SystemUI Hook (libxposed API 102):
  * Injects a real-time FPS readout into HyperOS Status Bar using NetworkSpeedView.
  *
- * Supports:
- * - Right side (near Battery & Network Speed): hooks StatusBarIconList + IconManager + NetworkSpeedController
- * - Left side (near Clock): hooks PhoneStatusBarViewController + MiuiCollapsedStatusBarFragment + MiuiPhoneStatusBarView
- * - Real-time switching & toggle via broadcast `dev.livefps.ACTION_CONFIG_CHANGED` without SystemUI restart
- * - Color synchronization with MiuiClock (dark mode / light mode adaptive)
- * - Fixed 2.0s polling rate (matching HyperCeiler)
+ * Direct container injection for both Left and Right side:
+ * - Left side (near Clock): PhoneStatusBarViewController.startSideContainer or clock.parent
+ * - Right side (near Battery / System icons): PhoneStatusBarViewController.endSideContainer or battery.parent
+ * - Zero conflict with HyperCeiler (does not hijack StatusBarIconList or IconManager slots)
+ * - Real-time switching (left/right) and toggle (on/off) via broadcast `dev.livefps.ACTION_CONFIG_CHANGED`
+ * - Dynamic color synchronization with MiuiClock (dark mode / light mode adaptive)
+ * - Fixed 2.0s polling rate (independent of overlay polling rate)
  * - Monotonic SurfaceFlinger timestats delta sampling (zero conflict with overlay)
  */
 object StatusBarFpsHook {
 
     private const val TAG = "LiveFPS"
-    private const val SLOT_NAME = "livefps_slot"
-    private const val SLOT_NETWORK_SPEED = "network_speed"
-    private const val ICON_TYPE = 91
     private const val ACTION_CONFIG_CHANGED = "dev.livefps.ACTION_CONFIG_CHANGED"
     private const val MSG_WORKER_TICK = 200021
-    private const val STATUSBAR_POLL_INTERVAL_MS = 2000L // 2.0s rate matching HyperCeiler
+    private const val STATUSBAR_POLL_INTERVAL_MS = 2000L // Fixed 2.0s rate matching HyperCeiler
 
-    private const val TAG_SLOT_TEXT_ICON = "livefps_statusbar_icon"
+    private const val TAG_LEFT = "livefps_statusbar_left"
+    private const val TAG_RIGHT = "livefps_statusbar_right"
     private const val TAG_NETWORK_SPEED_NUMBER = "network_speed_number"
     private const val TAG_NETWORK_SPEED_UNIT = "network_speed_unit"
+
     private const val FIELD_CONTAINER = "mContainer"
     private const val FIELD_NETWORK_SPEED_NUMBER_TEXT = "mNetworkSpeedNumberText"
     private const val FIELD_NETWORK_SPEED_UNIT_TEXT = "mNetworkSpeedUnitText"
     private const val FIELD_VISIBLE_BY_CONTROLLER = "mVisibleByController"
-    private const val FIELD_TYPE = "type"
-    private const val FIELD_M_TYPE = "mType"
-    private const val FIELD_M_CONTEXT = "mContext"
-    private const val FIELD_M_GROUP = "mGroup"
     private const val FIELD_M_CLOCK_VIEW = "mClockView"
 
     private const val METHOD_SET_VISIBILITY_BY_CONTROLLER = "setVisibilityByController"
-    private const val METHOD_SET_ICON = "setIcon"
-    private const val METHOD_GET_SLOT_INDEX = "getSlotIndex"
-    private const val METHOD_ON_CREATE_LAYOUT_PARAMS = "onCreateLayoutParams"
     private const val METHOD_SET_BLOCKED = "setBlocked"
     private const val METHOD_SET_NETWORK_SPEED = "setNetworkSpeed"
     private const val METHOD_ADD_DARK_RECEIVER = "addDarkReceiver"
 
     private const val PKG_SYSTEMUI = "com.android.systemui"
     private const val ID_CLOCK = "clock"
+    private const val ID_BATTERY = "battery"
     private const val STYLE_NETWORK_SPEED_NUMBER = "TextAppearance.StatusBar.NetWorkSpeedNumber"
     private const val STYLE_CLOCK = "TextAppearance.StatusBar.Clock"
 
@@ -90,7 +84,7 @@ object StatusBarFpsHook {
     private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
 
     fun init(module: XposedModule, classLoader: ClassLoader) {
-        Log.i(TAG, "StatusBarFpsHook initializing (matching HyperCeiler architecture)")
+        Log.i(TAG, "StatusBarFpsHook initializing (direct container injection)")
 
         // 1. Read initial preferences
         loadInitialPrefs(module)
@@ -108,16 +102,13 @@ object StatusBarFpsHook {
         // 4. Setup NetworkSpeedView hook behaviors (getSlot, setVisibleState, dark tint)
         setupNetworkSpeedViewHooks(module, nsvCls)
 
-        // 5. Setup Right Side hooks (StatusBarIconList + IconManager + NetworkSpeedController)
-        setupRightSideHooks(module, nsvCls, classLoader)
+        // 5. Setup Status Bar containers (Left near clock & Right near battery)
+        setupStatusBarContainers(module, nsvCls, classLoader)
 
-        // 6. Setup Left Side hooks (PhoneStatusBarViewController + MiuiCollapsedStatusBarFragment + MiuiPhoneStatusBarView)
-        setupLeftSideHooks(module, nsvCls, classLoader)
-
-        // 7. Setup MiuiClock color sync
+        // 6. Setup MiuiClock color sync
         setupClockColorSync(module, classLoader)
 
-        // 8. Start background sampling worker (fixed 2.0s interval)
+        // 7. Start background sampling worker (fixed 2.0s interval)
         startSamplingWorker()
     }
 
@@ -173,12 +164,12 @@ object StatusBarFpsHook {
     }
 
     private fun setupNetworkSpeedViewHooks(module: XposedModule, nsvCls: Class<*>) {
-        // getSlot -> SLOT_NAME
+        // getSlot -> "livefps_slot" for our own views
         for (m in nsvCls.declaredMethods.filter { it.name == "getSlot" && it.parameterTypes.isEmpty() }) {
             hookMethod(module, m) { chain ->
                 val nsView = chain.thisObject as? View
-                if (nsView?.tag == TAG_SLOT_TEXT_ICON) {
-                    SLOT_NAME
+                if (nsView?.tag == TAG_LEFT || nsView?.tag == TAG_RIGHT) {
+                    "livefps_slot"
                 } else {
                     chain.proceed()
                 }
@@ -189,7 +180,7 @@ object StatusBarFpsHook {
         for (m in nsvCls.declaredMethods.filter { it.name == "setVisibleState" }) {
             hookMethod(module, m) { chain ->
                 val nsView = chain.thisObject as? View
-                if (nsView?.tag == TAG_SLOT_TEXT_ICON) {
+                if (nsView?.tag == TAG_LEFT || nsView?.tag == TAG_RIGHT) {
                     val state = chain.args.getOrNull(0) as? Int ?: 0
                     val visible = state != 2
                     val number = (getField(nsView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (nsView as? TextView)
@@ -206,7 +197,7 @@ object StatusBarFpsHook {
             hookMethod(module, m) { chain ->
                 val res = chain.proceed()
                 val nsView = chain.thisObject as? View
-                if (nsView?.tag == TAG_SLOT_TEXT_ICON) {
+                if (nsView?.tag == TAG_LEFT || nsView?.tag == TAG_RIGHT) {
                     syncColorWithClock(nsView)
                 }
                 res
@@ -214,124 +205,7 @@ object StatusBarFpsHook {
         }
     }
 
-    private fun setupRightSideHooks(module: XposedModule, nsvCls: Class<*>, classLoader: ClassLoader) {
-        // 1. StatusBarIconList: insert SLOT_NAME after SLOT_NETWORK_SPEED
-        val sbiListCls = findClass("com.android.systemui.statusbar.phone.ui.StatusBarIconList", classLoader)
-            ?: findClass("com.android.systemui.statusbar.phone.StatusBarIconList", classLoader)
-        if (sbiListCls != null) {
-            for (ctor in sbiListCls.declaredConstructors.filter { it.parameterTypes.size == 1 && it.parameterTypes[0] == Array<String>::class.java }) {
-                hookConstructor(module, ctor) { chain ->
-                    @Suppress("UNCHECKED_CAST")
-                    val slots = chain.args.getOrNull(0) as? Array<String>
-                    if (slots != null) {
-                        val slotList = ArrayList(slots.toList())
-                        if (!slotList.contains(SLOT_NAME)) {
-                            val netSpeedIndex = slotList.indexOf(SLOT_NETWORK_SPEED)
-                            if (netSpeedIndex >= 0) {
-                                slotList.add(netSpeedIndex + 1, SLOT_NAME)
-                            } else {
-                                slotList.add(SLOT_NAME)
-                            }
-                            chain.args[0] = slotList.toTypedArray()
-                        }
-                    }
-                    chain.proceed()
-                }
-            }
-        }
-
-        // 2. NetworkSpeedController: register icon to mStatusBarIconController
-        val nscCls = findClass("com.android.systemui.statusbar.policy.NetworkSpeedController", classLoader)
-        if (nscCls != null) {
-            for (ctor in nscCls.declaredConstructors) {
-                hookConstructor(module, ctor) { chain ->
-                    val res = chain.proceed()
-                    val iconController = getField(chain.thisObject, "mStatusBarIconController")
-                    if (iconController != null) {
-                        registerIconToController(iconController, classLoader)
-                    }
-                    res
-                }
-            }
-        }
-
-        // 3. StatusBarIconControllerImpl.setIcon: enforce ICON_TYPE for our slot
-        val sbicImplCls = findClass("com.android.systemui.statusbar.phone.ui.StatusBarIconControllerImpl", classLoader)
-            ?: findClass("com.android.systemui.statusbar.phone.StatusBarIconControllerImpl", classLoader)
-        if (sbicImplCls != null) {
-            for (m in sbicImplCls.declaredMethods.filter { it.name == METHOD_SET_ICON && it.parameterTypes.size == 2 }) {
-                hookMethod(module, m) { chain ->
-                    val slotName = chain.args.getOrNull(0) as? String
-                    if (slotName == SLOT_NAME) {
-                        val iconHolder = chain.args.getOrNull(1)
-                        if (iconHolder != null) {
-                            setField(iconHolder, FIELD_TYPE, ICON_TYPE)
-                            setField(iconHolder, FIELD_M_TYPE, ICON_TYPE)
-                        }
-                    }
-                    chain.proceed()
-                }
-            }
-        }
-
-        // 4. IconManager.addHolder: instantiate and add NetworkSpeedView to right container group
-        val iconManagerCls = findClass("com.android.systemui.statusbar.phone.ui.IconManager", classLoader)
-            ?: findClass("com.android.systemui.statusbar.phone.StatusBarIconController\$IconManager", classLoader)
-        if (iconManagerCls != null) {
-            for (m in iconManagerCls.declaredMethods.filter { it.name == "addHolder" && it.parameterTypes.size == 4 }) {
-                hookMethod(module, m) { chain ->
-                    val iconHolder = chain.args.getOrNull(3)
-                    val type = if (iconHolder != null) {
-                        (getField(iconHolder, FIELD_TYPE) as? Int) ?: (getField(iconHolder, FIELD_M_TYPE) as? Int) ?: -1
-                    } else -1
-
-                    if (type == ICON_TYPE) {
-                        val iconManager = chain.thisObject
-                        val context = getField(iconManager, FIELD_M_CONTEXT) as? Context ?: return@hookMethod chain.proceed()
-                        registerReceiverWithContext(context)
-                        val lp = (runCatching { callMethod(iconManager, METHOD_ON_CREATE_LAYOUT_PARAMS) as? LinearLayout.LayoutParams }.getOrNull())
-                            ?: LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                        val group = getField(iconManager, FIELD_M_GROUP) as? ViewGroup ?: return@hookMethod chain.proceed()
-                        val existing = group.findViewWithTag<View>(TAG_SLOT_TEXT_ICON)
-                        if (existing != null) {
-                            if (!rightViews.contains(existing)) rightViews.add(existing)
-                            return@hookMethod existing
-                        } else {
-                            val iconView = createStatusbarTextIcon(nsvCls, context, lp, true)
-                            val index = (chain.args.getOrNull(0) as? Int ?: 0).coerceIn(0, group.childCount)
-                            group.addView(iconView, index)
-                            rightViews.add(iconView)
-                            Log.i(TAG, "Added right-side NetworkSpeedView into group at index $index")
-                            updateVisibilities()
-                            return@hookMethod iconView
-                        }
-                    }
-                    chain.proceed()
-                }
-            }
-        }
-    }
-
-    private fun registerIconToController(iconController: Any, classLoader: ClassLoader) {
-        runCatching {
-            callMethod(iconController, METHOD_SET_ICON, SLOT_NAME, 0)
-        }.onFailure {
-            runCatching {
-                val slotIndex = callMethod(iconController, METHOD_GET_SLOT_INDEX, SLOT_NAME) as? Int ?: 0
-                val sbHolderCls = findClass("com.android.systemui.statusbar.phone.StatusBarIconHolder", classLoader)
-                if (sbHolderCls != null) {
-                    val ctor = sbHolderCls.declaredConstructors.firstOrNull { it.parameterTypes.isEmpty() } ?: sbHolderCls.declaredConstructors.first()
-                    ctor.isAccessible = true
-                    val holder = ctor.newInstance()
-                    setField(holder, FIELD_TYPE, ICON_TYPE)
-                    setField(holder, FIELD_M_TYPE, ICON_TYPE)
-                    callMethod(iconController, METHOD_SET_ICON, slotIndex, holder)
-                }
-            }
-        }
-    }
-
-    private fun setupLeftSideHooks(module: XposedModule, nsvCls: Class<*>, classLoader: ClassLoader) {
+    private fun setupStatusBarContainers(module: XposedModule, nsvCls: Class<*>, classLoader: ClassLoader) {
         // 1. PhoneStatusBarViewController.onViewAttached
         val controllerCls = findClass("com.android.systemui.statusbar.phone.PhoneStatusBarViewController", classLoader)
         if (controllerCls != null) {
@@ -340,12 +214,21 @@ object StatusBarFpsHook {
                     val res = chain.proceed()
                     val controller = chain.thisObject
                     val clockView = (getField(controller, "clock") as? View) ?: (getField(controller, FIELD_M_CLOCK_VIEW) as? View)
-                    val startSideContainer = getField(controller, "startSideContainer") as? ViewGroup
+                    val batteryView = getField(controller, "battery") as? View
+                    val startSide = getField(controller, "startSideContainer") as? ViewGroup
+                    val endSide = getField(controller, "endSideContainer") as? ViewGroup
                     val darkDispatcher = getField(controller, "darkIconDispatcher")
-                    val context = clockView?.context ?: startSideContainer?.context
+                    val context = clockView?.context ?: startSide?.context ?: batteryView?.context ?: endSide?.context
+
                     if (context != null) {
                         registerReceiverWithContext(context)
-                        injectToLeftContainer(nsvCls, context, clockView, startSideContainer, darkDispatcher, classLoader)
+                        // Left side near clock
+                        val leftContainer = startSide ?: (clockView?.parent as? ViewGroup)
+                        injectToContainer(leftViews, nsvCls, context, leftContainer, clockView, darkDispatcher, classLoader, TAG_LEFT, true)
+
+                        // Right side near battery
+                        val rightContainer = endSide ?: (batteryView?.parent as? ViewGroup)
+                        injectToContainer(rightViews, nsvCls, context, rightContainer, batteryView, darkDispatcher, classLoader, TAG_RIGHT, false)
                     }
                     res
                 }
@@ -363,10 +246,19 @@ object StatusBarFpsHook {
                     val context = rootView?.context ?: runCatching { fragment.javaClass.getMethod("getContext").invoke(fragment) as? Context }.getOrNull()
                     if (context != null) {
                         registerReceiverWithContext(context)
-                        val clockId = context.resources.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
+                        val resIds = context.resources
+                        val clockId = resIds.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
                         val clockView = (getField(fragment, FIELD_M_CLOCK_VIEW) as? View) ?: if (clockId != 0 && rootView != null) rootView.findViewById(clockId) else null
-                        val container = clockView?.parent as? ViewGroup
-                        injectToLeftContainer(nsvCls, context, clockView, container, null, classLoader)
+                        val batteryId = resIds.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
+                        val batteryView = if (batteryId != 0 && rootView != null) rootView.findViewById<View>(batteryId) else null
+
+                        // Left
+                        val leftContainer = clockView?.parent as? ViewGroup
+                        injectToContainer(leftViews, nsvCls, context, leftContainer, clockView, null, classLoader, TAG_LEFT, true)
+
+                        // Right
+                        val rightContainer = (batteryView?.parent as? ViewGroup) ?: (rootView as? ViewGroup)?.let { findRightContainer(it) }
+                        injectToContainer(rightViews, nsvCls, context, rightContainer, batteryView, null, classLoader, TAG_RIGHT, false)
                     }
                     res
                 }
@@ -381,13 +273,21 @@ object StatusBarFpsHook {
                     val res = chain.proceed()
                     val view = chain.thisObject as? ViewGroup
                     if (view != null) {
-                        registerReceiverWithContext(view.context)
-                        val clockId = view.resources.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
+                        val context = view.context
+                        registerReceiverWithContext(context)
+                        val resIds = context.resources
+                        val clockId = resIds.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
                         val clockView = if (clockId != 0) view.findViewById<View>(clockId) else null
-                        val container = clockView?.parent as? ViewGroup
-                        if (container != null) {
-                            injectToLeftContainer(nsvCls, view.context, clockView, container, null, classLoader)
-                        }
+                        val batteryId = resIds.getIdentifier(ID_BATTERY, "id", PKG_SYSTEMUI)
+                        val batteryView = if (batteryId != 0) view.findViewById<View>(batteryId) else null
+
+                        // Left
+                        val leftContainer = clockView?.parent as? ViewGroup
+                        injectToContainer(leftViews, nsvCls, context, leftContainer, clockView, null, classLoader, TAG_LEFT, true)
+
+                        // Right
+                        val rightContainer = findRightContainer(view) ?: (batteryView?.parent as? ViewGroup)
+                        injectToContainer(rightViews, nsvCls, context, rightContainer, batteryView, null, classLoader, TAG_RIGHT, false)
                     }
                     res
                 }
@@ -395,33 +295,56 @@ object StatusBarFpsHook {
         }
     }
 
-    private fun injectToLeftContainer(
+    private fun findRightContainer(root: ViewGroup): ViewGroup? {
+        val sysAreaField = getField(root, "mSystemIconArea") as? ViewGroup
+        if (sysAreaField != null) return sysAreaField
+
+        val res = root.resources
+        for (name in listOf("end_side_container", "system_icons", "system_icon_area", "status_bar_icons", "statusIcons")) {
+            val id = res.getIdentifier(name, "id", PKG_SYSTEMUI)
+            if (id != 0) {
+                val v = root.findViewById<ViewGroup>(id)
+                if (v != null) return v
+            }
+        }
+        return null
+    }
+
+    private fun injectToContainer(
+        targetList: CopyOnWriteArrayList<View>,
         nsvCls: Class<*>,
         context: Context,
-        clockView: View?,
         targetContainer: ViewGroup?,
+        anchorView: View?,
         providedDarkDispatcher: Any?,
-        classLoader: ClassLoader
+        classLoader: ClassLoader,
+        viewTag: String,
+        isLeft: Boolean
     ) {
-        val container = targetContainer ?: (clockView?.parent as? ViewGroup) ?: return
-        val existing = container.findViewWithTag<View>(TAG_SLOT_TEXT_ICON)
+        val container = targetContainer ?: return
+        val existing = container.findViewWithTag<View>(viewTag)
         if (existing != null) {
-            if (!leftViews.contains(existing)) leftViews.add(existing)
-            syncColorWithClock(existing, clockView as? TextView)
+            if (!targetList.contains(existing)) targetList.add(existing)
+            syncColorWithClock(existing)
             return
         }
 
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        val iconView = createStatusbarTextIcon(nsvCls, context, lp, false)
-        val index = if (clockView != null && clockView.parent === container) {
-            (container.indexOfChild(clockView) + 1).coerceIn(0, container.childCount)
+        val iconView = createStatusbarTextIcon(nsvCls, context, lp).apply { tag = viewTag }
+
+        val index = if (anchorView != null && anchorView.parent === container) {
+            if (isLeft) {
+                (container.indexOfChild(anchorView) + 1).coerceIn(0, container.childCount) // after clock
+            } else {
+                container.indexOfChild(anchorView).coerceIn(0, container.childCount) // right before battery
+            }
         } else {
-            container.childCount
+            if (isLeft) container.childCount else 0
         }
         container.addView(iconView, index)
-        leftViews.add(iconView)
-        syncColorWithClock(iconView, clockView as? TextView)
-        Log.i(TAG, "Added left-side NetworkSpeedView into container at index $index")
+        targetList.add(iconView)
+        syncColorWithClock(iconView)
+        Log.i(TAG, "Injected $viewTag into container $container at index $index")
 
         val darkDispatcher = providedDarkDispatcher ?: runCatching {
             val darkCls = findClass("com.android.systemui.plugins.DarkIconDispatcher", classLoader)
@@ -442,8 +365,7 @@ object StatusBarFpsHook {
     private fun createStatusbarTextIcon(
         nsvCls: Class<*>,
         context: Context,
-        lp: ViewGroup.LayoutParams,
-        fromController: Boolean
+        lp: ViewGroup.LayoutParams
     ): View {
         val constructors = nsvCls.declaredConstructors
         val constructor = constructors.firstOrNull { it.parameterTypes.size == 1 && it.parameterTypes[0] == Context::class.java }
@@ -457,13 +379,12 @@ object StatusBarFpsHook {
             constructor.newInstance(context, null) as ViewGroup
         }
 
-        iconView.tag = TAG_SLOT_TEXT_ICON
         iconView.layoutParams = lp
 
         val number = TextView(context).apply {
             tag = TAG_NETWORK_SPEED_NUMBER
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER
             isSingleLine = true
         }
         iconView.addView(number)
@@ -488,33 +409,20 @@ object StatusBarFpsHook {
             }
         }
 
-        initStatusbarTextIcon(context, lp, iconView, fromController)
-        return iconView
-    }
-
-    private fun initStatusbarTextIcon(
-        context: Context,
-        lp: ViewGroup.LayoutParams,
-        iconView: View,
-        fromController: Boolean
-    ) {
-        if (!fromController) {
-            runCatching { callMethod(iconView, METHOD_SET_BLOCKED, false) }
-        }
-        val iconTextView = (getField(iconView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView)
-            ?: (iconView as? TextView) ?: return
+        runCatching { callMethod(iconView, METHOD_SET_BLOCKED, false) }
 
         val res = context.resources
         val styleId = res.getIdentifier(STYLE_NETWORK_SPEED_NUMBER, "style", PKG_SYSTEMUI)
             .takeIf { it != 0 }
             ?: res.getIdentifier(STYLE_CLOCK, "style", PKG_SYSTEMUI)
         if (styleId != 0) {
-            runCatching { iconTextView.setTextAppearance(styleId) }
+            runCatching { number.setTextAppearance(styleId) }
         }
         syncColorWithClock(iconView)
-        iconTextView.isSingleLine = true
         val dp = res.displayMetrics.density
-        iconTextView.setPaddingRelative((4 * dp).toInt(), 0, (4 * dp).toInt(), 0)
+        number.setPaddingRelative((3 * dp).toInt(), 0, (3 * dp).toInt(), 0)
+
+        return iconView
     }
 
     private fun setupClockColorSync(module: XposedModule, classLoader: ClassLoader) {
@@ -701,21 +609,6 @@ object StatusBarFpsHook {
             }
         }.onFailure {
             Log.w(TAG, "Failed hooking method ${method.declaringClass.name}#${method.name}: ${it.message}")
-        }
-    }
-
-    private fun hookConstructor(
-        module: XposedModule,
-        constructor: Constructor<*>,
-        callback: (chain: XposedInterface.Chain) -> Any?
-    ) {
-        runCatching {
-            constructor.isAccessible = true
-            module.hook(constructor).intercept { chain ->
-                callback(chain)
-            }
-        }.onFailure {
-            Log.w(TAG, "Failed hooking constructor ${constructor.declaringClass.name}: ${it.message}")
         }
     }
 
