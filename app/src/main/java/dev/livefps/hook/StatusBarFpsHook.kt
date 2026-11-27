@@ -5,6 +5,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -44,6 +46,7 @@ object StatusBarFpsHook {
 
     private const val TAG = "LiveFPS"
     private const val ACTION_CONFIG_CHANGED = "dev.livefps.ACTION_CONFIG_CHANGED"
+    private const val ACTION_FPS_UPDATE = "dev.livefps.ACTION_FPS_UPDATE"
     private const val MSG_WORKER_TICK = 200021
     private const val STATUSBAR_POLL_INTERVAL_MS = 2000L // Fixed 2.0s rate matching HyperCeiler
 
@@ -72,6 +75,7 @@ object StatusBarFpsHook {
     private val leftViews = CopyOnWriteArrayList<View>()
     private val rightViews = CopyOnWriteArrayList<View>()
     private val clockCache = Collections.synchronizedMap(WeakHashMap<View, WeakReference<TextView>>())
+    @Volatile private var cachedClockRef: WeakReference<TextView>? = null
     @Volatile private var receiverRegistered = false
 
     @Volatile private var isEnabled = false
@@ -81,6 +85,7 @@ object StatusBarFpsHook {
     private var workerHandler: Handler? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var lastTimestatsEnableTime = 0L
+    @Volatile private var lastOverlaySyncTime = 0L
 
     private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
 
@@ -144,18 +149,32 @@ object StatusBarFpsHook {
     private fun registerReceiverWithContext(context: Context) {
         if (receiverRegistered) return
         val appContext = runCatching { context.applicationContext }.getOrNull() ?: context
-        val filter = IntentFilter(ACTION_CONFIG_CHANGED)
+        val filter = IntentFilter().apply {
+            addAction(ACTION_CONFIG_CHANGED)
+            addAction(ACTION_FPS_UPDATE)
+        }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                if (intent?.action == ACTION_CONFIG_CHANGED) {
-                    val prevEnabled = isEnabled
-                    isEnabled = intent.getBooleanExtra("enabled", isEnabled)
-                    currentPosition = intent.getStringExtra("position") ?: currentPosition
-                    if (isEnabled && !prevEnabled) {
-                        lastTimestatsEnableTime = 0L
+                when (intent?.action) {
+                    ACTION_CONFIG_CHANGED -> {
+                        val prevEnabled = isEnabled
+                        isEnabled = intent.getBooleanExtra("enabled", isEnabled)
+                        currentPosition = intent.getStringExtra("position") ?: currentPosition
+                        if (isEnabled && !prevEnabled) {
+                            lastTimestatsEnableTime = 0L
+                        }
+                        Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
+                        updateVisibilities()
                     }
-                    Log.i(TAG, "Broadcast received: isEnabled=$isEnabled, pos=$currentPosition")
-                    updateVisibilities()
+                    ACTION_FPS_UPDATE -> {
+                        val fps = intent.getStringExtra("fps")
+                        if (!fps.isNullOrEmpty()) {
+                            lastOverlaySyncTime = SystemClock.elapsedRealtime()
+                            if (isEnabled) {
+                                mainHandler.post { updateFpsText(fps) }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -166,7 +185,7 @@ object StatusBarFpsHook {
                 appContext.registerReceiver(receiver, filter)
             }
             receiverRegistered = true
-            Log.i(TAG, "Broadcast receiver registered for $ACTION_CONFIG_CHANGED")
+            Log.i(TAG, "Broadcast receiver registered for $ACTION_CONFIG_CHANGED and $ACTION_FPS_UPDATE")
         }.onFailure {
             Log.e(TAG, "Failed to register broadcast receiver", it)
         }
@@ -207,6 +226,11 @@ object StatusBarFpsHook {
                 val res = chain.proceed()
                 val nsView = chain.thisObject as? View
                 if (nsView?.tag == TAG_LEFT || nsView?.tag == TAG_RIGHT) {
+                    val tint = chain.args.filterIsInstance<Int>().firstOrNull()
+                    val number = (getField(nsView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (nsView as? TextView)
+                    if (tint != null && number != null) {
+                        number.setTextColor(tint)
+                    }
                     syncColorWithClock(nsView)
                 }
                 res
@@ -454,6 +478,9 @@ object StatusBarFpsHook {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
             gravity = Gravity.CENTER
             isSingleLine = true
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            alpha = 1.0f
         }
         iconView.addView(number)
 
@@ -480,12 +507,15 @@ object StatusBarFpsHook {
         runCatching { callMethod(iconView, METHOD_SET_BLOCKED, false) }
 
         val res = context.resources
-        val styleId = res.getIdentifier(STYLE_NETWORK_SPEED_NUMBER, "style", PKG_SYSTEMUI)
-            .takeIf { it != 0 }
-            ?: res.getIdentifier(STYLE_CLOCK, "style", PKG_SYSTEMUI)
+        val clockStyleId = res.getIdentifier(STYLE_CLOCK, "style", PKG_SYSTEMUI)
+        val netStyleId = res.getIdentifier(STYLE_NETWORK_SPEED_NUMBER, "style", PKG_SYSTEMUI)
+        val styleId = if (clockStyleId != 0) clockStyleId else netStyleId
         if (styleId != 0) {
             runCatching { number.setTextAppearance(styleId) }
         }
+        number.typeface = Typeface.DEFAULT_BOLD
+        number.alpha = 1.0f
+        number.setTextColor(Color.WHITE)
         syncColorWithClock(iconView)
         val dp = res.displayMetrics.density
         number.setPaddingRelative((3 * dp).toInt(), 0, (3 * dp).toInt(), 0)
@@ -510,6 +540,7 @@ object StatusBarFpsHook {
                         val clock = chain.thisObject as? TextView
                         if (clock != null) {
                             mainHandler.post {
+                                cachedClockRef = WeakReference(clock)
                                 for (v in leftViews) syncColorWithClock(v, clock)
                                 for (v in rightViews) syncColorWithClock(v, clock)
                             }
@@ -524,29 +555,66 @@ object StatusBarFpsHook {
     private fun syncColorWithClock(iconView: View, clockView: TextView? = null) {
         val clock = clockView ?: findCachedClock(iconView)
         val number = (getField(iconView, FIELD_NETWORK_SPEED_NUMBER_TEXT) as? TextView) ?: (iconView as? TextView)
-        if (number != null && clock != null) {
-            val colors = clock.textColors
-            if (colors != null) {
-                number.setTextColor(colors)
-            }
-            val clockAlpha = clock.alpha
-            if (Math.abs(iconView.alpha - clockAlpha) > 0.01f) {
-                iconView.alpha = clockAlpha
+        if (number != null) {
+            number.typeface = Typeface.DEFAULT_BOLD
+            if (clock != null) {
+                val colors = clock.textColors
+                if (colors != null) {
+                    number.setTextColor(colors)
+                } else {
+                    number.setTextColor(clock.currentTextColor)
+                }
+                val clockAlpha = clock.alpha
+                if (Math.abs(number.alpha - clockAlpha) > 0.01f) {
+                    number.alpha = clockAlpha
+                }
+                if (Math.abs(iconView.alpha - clockAlpha) > 0.01f) {
+                    iconView.alpha = clockAlpha
+                }
+            } else {
+                number.setTextColor(Color.WHITE)
+                number.alpha = 1.0f
+                iconView.alpha = 1.0f
             }
         }
     }
 
     private fun findCachedClock(iconView: View): TextView? {
-        val container = iconView.parent as? ViewGroup ?: return null
         synchronized(clockCache) {
             clockCache[iconView]?.get()?.let { cached ->
-                if (cached.parent === container) return cached
+                if (cached.isAttachedToWindow) return cached
                 clockCache.remove(iconView)
             }
-            val clockId = container.resources.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
-            val clock = if (clockId != 0) container.findViewById<TextView>(clockId) else null
+            cachedClockRef?.get()?.let { cached ->
+                if (cached.isAttachedToWindow) {
+                    clockCache[iconView] = WeakReference(cached)
+                    return cached
+                }
+                cachedClockRef = null
+            }
+            for (lv in leftViews) {
+                clockCache[lv]?.get()?.let { cached ->
+                    if (cached.isAttachedToWindow) {
+                        clockCache[iconView] = WeakReference(cached)
+                        cachedClockRef = WeakReference(cached)
+                        return cached
+                    }
+                }
+            }
+
+            val res = iconView.resources ?: return null
+            val clockId = res.getIdentifier(ID_CLOCK, "id", PKG_SYSTEMUI)
+            if (clockId == 0) return null
+
+            val container = iconView.parent as? ViewGroup
+            var clock = container?.findViewById<TextView>(clockId)
+            if (clock == null) {
+                clock = iconView.rootView?.findViewById<TextView>(clockId)
+            }
             if (clock != null) {
-                clockCache[iconView] = WeakReference(clock)
+                val ref = WeakReference(clock)
+                clockCache[iconView] = ref
+                cachedClockRef = ref
             }
             return clock
         }
@@ -612,6 +680,13 @@ object StatusBarFpsHook {
                 val isScreenOn = powerManager?.isInteractive ?: true
 
                 if (!isEnabled || !isScreenOn) {
+                    return
+                }
+
+                val nowMs = SystemClock.elapsedRealtime()
+                if (nowMs - lastOverlaySyncTime < 3500L) {
+                    // Floating overlay is running and actively broadcasting synchronized FPS every 2s.
+                    // Skip redundant dumpsys to preserve resources and maintain lockstep sync.
                     return
                 }
 

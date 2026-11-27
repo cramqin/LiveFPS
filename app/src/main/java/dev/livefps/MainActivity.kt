@@ -40,24 +40,13 @@ class MainActivity : Activity() {
     private lateinit var fpsStatusPill: TextView
     private lateinit var actionButton: Button
     private lateinit var permissionBanner: LinearLayout
-    private val rateButtons = ArrayList<TextView>()
-    private var customRateButton: TextView? = null
-
     // Status Bar Card Views
     private lateinit var statusBarToggleBtn: Button
     private lateinit var posLeftBtn: TextView
     private lateinit var posRightBtn: TextView
 
-    private var selectedIntervalMs = FpsService.DEFAULT_INTERVAL_MS
     private var isStatusBarEnabled = false
     private var statusBarPosition = "right"
-
-    private val presetRates = listOf(
-        Pair(250L, "250ms\n4 Hz"),
-        Pair(500L, "500ms\n2 Hz"),
-        Pair(1000L, "1.0s\n1 Hz"),
-        Pair(2000L, "2.0s\n0.5 Hz")
-    )
 
     private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -84,7 +73,6 @@ class MainActivity : Activity() {
         window.navigationBarColor = Color.parseColor("#121212")
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        selectedIntervalMs = FpsService.getSavedInterval(this)
         isStatusBarEnabled = prefs.getBoolean(KEY_STATUSBAR_ENABLED, false)
         statusBarPosition = prefs.getString(KEY_STATUSBAR_POSITION, "right") ?: "right"
 
@@ -137,15 +125,12 @@ class MainActivity : Activity() {
         // 1. Hero Card: Live In-App FPS Display
         content.addView(buildHeroFpsCard())
 
-        // 2. Polling Rate Selector Card
-        content.addView(buildPollingRateCard())
-
-        // 3. Permission warning banner & Floating Overlay Action Card (placed directly below Polling Rate)
+        // 2. Permission warning banner & Floating Overlay Action Card
         permissionBanner = buildPermissionBanner()
         content.addView(permissionBanner)
         content.addView(buildActionCard())
 
-        // 4. Status Bar (LSPosed) Independent Card
+        // 3. Status Bar (LSPosed) Independent Card
         content.addView(buildStatusBarCard())
 
         // 5. Info Card
@@ -325,131 +310,7 @@ class MainActivity : Activity() {
         return card
     }
 
-    private fun buildPollingRateCard(): View {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = roundedBox(Color.parseColor("#1C1C1E"), 20f, Color.parseColor("#2C2C2E"), 1f)
-            setPadding(dp(20f), dp(18f), dp(20f), dp(18f))
-            val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            lp.bottomMargin = dp(16f)
-            layoutParams = lp
-        }
 
-        val title = TextView(this).apply {
-            text = "POLLING RATE"
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.08f
-            setTextColor(Color.parseColor("#8E8E93"))
-        }
-        card.addView(title)
-
-        val desc = TextView(this).apply {
-            text = "SurfaceFlinger sampling frequency (Presets or Custom seconds)"
-            textSize = 12f
-            setTextColor(Color.parseColor("#8E8E93"))
-            val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            lp.topMargin = dp(2f)
-            lp.bottomMargin = dp(12f)
-            layoutParams = lp
-        }
-        card.addView(desc)
-
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            layoutParams = lp
-        }
-
-        rateButtons.clear()
-        presetRates.forEachIndexed { index, pair ->
-            val ms = pair.first
-            val labelText = pair.second
-            val btn = TextView(this).apply {
-                text = labelText
-                textSize = 11f
-                gravity = Gravity.CENTER
-                setPadding(dp(4f), dp(10f), dp(4f), dp(10f))
-                val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                if (index > 0) lp.marginStart = dp(6f)
-                layoutParams = lp
-                setOnClickListener { selectPollingRate(ms) }
-            }
-            rateButtons.add(btn)
-            row.addView(btn)
-        }
-
-        val customBtn = TextView(this).apply {
-            text = formatCustomButtonText()
-            textSize = 11f
-            gravity = Gravity.CENTER
-            setPadding(dp(4f), dp(10f), dp(4f), dp(10f))
-            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            lp.marginStart = dp(6f)
-            layoutParams = lp
-            setOnClickListener { showCustomPollingDialog() }
-        }
-        customRateButton = customBtn
-        row.addView(customBtn)
-
-        card.addView(row)
-        updatePollingButtonsStyle()
-
-        return card
-    }
-
-    private fun formatCustomButtonText(): String {
-        val isPreset = presetRates.any { it.first == selectedIntervalMs }
-        return if (isPreset) {
-            "Custom\n..."
-        } else {
-            val sec = selectedIntervalMs / 1000f
-            "%.2fs\nCustom".format(sec)
-        }
-    }
-
-    private fun showCustomPollingDialog() {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24f), dp(16f), dp(24f), dp(8f))
-        }
-
-        val currentSec = "%.2f".format(selectedIntervalMs / 1000f)
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            setText(currentSec)
-            setSelection(text.length)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            hint = "e.g. 1.5"
-        }
-        container.addView(input)
-
-        AlertDialog.Builder(this)
-            .setTitle("Custom Polling Rate")
-            .setMessage("Enter sampling interval in seconds (0.1s to 10.0s):")
-            .setView(container)
-            .setPositiveButton("Set") { _, _ ->
-                val secVal = input.text.toString().toDoubleOrNull()
-                if (secVal != null && secVal > 0) {
-                    val ms = (secVal * 1000).toLong().coerceIn(100L, 30000L)
-                    selectPollingRate(ms)
-                } else {
-                    Toast.makeText(this, "Please enter a valid number of seconds", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
 
     private fun buildStatusBarCard(): View {
         val card = LinearLayout(this).apply {
@@ -777,54 +638,13 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
-    private fun selectPollingRate(ms: Long) {
-        selectedIntervalMs = ms
-        FpsService.updateInterval(this, ms)
-        updatePollingButtonsStyle()
-        updateFpsDisplay(FpsState.currentFps, FpsState.currentLabel)
-        dispatchStatusBarConfig()
-    }
-
-    private fun updatePollingButtonsStyle() {
-        var isPresetActive = false
-        presetRates.forEachIndexed { index, pair ->
-            val ms = pair.first
-            val btn = rateButtons.getOrNull(index) ?: return@forEachIndexed
-            if (ms == selectedIntervalMs) {
-                isPresetActive = true
-                btn.background = roundedBox(Color.parseColor("#00E676"), 12f)
-                btn.setTextColor(Color.parseColor("#121212"))
-                btn.typeface = Typeface.DEFAULT_BOLD
-            } else {
-                btn.background = roundedBox(Color.parseColor("#2A2A2E"), 12f, Color.parseColor("#38383A"), 1f)
-                btn.setTextColor(Color.parseColor("#CCCCCC"))
-                btn.typeface = Typeface.DEFAULT
-            }
-        }
-
-        customRateButton?.let { cBtn ->
-            cBtn.text = formatCustomButtonText()
-            if (!isPresetActive) {
-                cBtn.background = roundedBox(Color.parseColor("#00E676"), 12f)
-                cBtn.setTextColor(Color.parseColor("#121212"))
-                cBtn.typeface = Typeface.DEFAULT_BOLD
-            } else {
-                cBtn.background = roundedBox(Color.parseColor("#2A2A2E"), 12f, Color.parseColor("#38383A"), 1f)
-                cBtn.setTextColor(Color.parseColor("#CCCCCC"))
-                cBtn.typeface = Typeface.DEFAULT
-            }
-        }
-    }
-
     @SuppressLint("SetTextI18n")
     private fun updateFpsDisplay(fps: Double?, label: String) {
         if (fps != null) {
             fpsNumberView.text = "%.0f".format(fps)
             fpsNumberView.setTextColor(Color.parseColor("#00E676"))
             fpsUnitView.setTextColor(Color.parseColor("#00E676"))
-            val sec = selectedIntervalMs / 1000f
-            val timingText = if (selectedIntervalMs % 1000L == 0L) "${selectedIntervalMs / 1000}s" else "%.2fs".format(sec)
-            fpsStatusPill.text = "🟢 Active • Updating every $timingText"
+            fpsStatusPill.text = "🟢 Active • Updating every 2s"
             fpsStatusPill.setTextColor(Color.parseColor("#00E676"))
             fpsStatusPill.background = roundedBox(Color.parseColor("#132A1C"), 10f, Color.parseColor("#00E676"), 1f)
         } else if (FpsService.running) {

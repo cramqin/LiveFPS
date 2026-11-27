@@ -64,7 +64,8 @@ class FpsService : Service() {
     companion object {
         const val PREFS_NAME = "livefps_prefs"
         const val KEY_INTERVAL_MS = "interval_ms"
-        const val DEFAULT_INTERVAL_MS = 1000L
+        const val DEFAULT_INTERVAL_MS = 2000L
+        const val ACTION_FPS_UPDATE = "dev.livefps.ACTION_FPS_UPDATE"
 
         @Volatile var running = false
         @Volatile var pollingIntervalMs = DEFAULT_INTERVAL_MS
@@ -73,17 +74,16 @@ class FpsService : Service() {
         private const val CHANNEL = "fps"
         private val FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
 
-        fun updateInterval(context: Context, newIntervalMs: Long) {
-            pollingIntervalMs = newIntervalMs
+        fun updateInterval(context: Context, newIntervalMs: Long = DEFAULT_INTERVAL_MS) {
+            pollingIntervalMs = DEFAULT_INTERVAL_MS
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
-                .putLong(KEY_INTERVAL_MS, newIntervalMs)
+                .putLong(KEY_INTERVAL_MS, DEFAULT_INTERVAL_MS)
                 .apply()
         }
 
         fun getSavedInterval(context: Context): Long {
-            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getLong(KEY_INTERVAL_MS, DEFAULT_INTERVAL_MS)
+            return DEFAULT_INTERVAL_MS
         }
     }
 
@@ -420,7 +420,7 @@ class FpsService : Service() {
                         lastFrames = -1L
                     }
 
-                    val currentInterval = pollingIntervalMs.coerceAtLeast(100L)
+                    val currentInterval = DEFAULT_INTERVAL_MS
                     Thread.sleep(currentInterval)
                     if (!screenOn || !alive) continue
 
@@ -440,7 +440,9 @@ class FpsService : Service() {
                         lastFrames = currentFrames
                     }
 
-                    val label = if (currentFrames == null) "no root" else "%.0f fps".format(fpsVal ?: 0.0)
+                    val fpsInt = fpsVal?.let { Math.round(it).toInt() }
+                    val fpsStr = fpsInt?.toString() ?: "0"
+                    val label = if (currentFrames == null) "no root" else "$fpsStr fps"
 
                     // Avoid redundant layout/draw invalidations if text is unchanged
                     if (label != lastOverlayLabel) {
@@ -452,6 +454,13 @@ class FpsService : Service() {
                     FpsState.currentLabel = label
                     mainHandler.post {
                         FpsState.listener?.invoke(fpsVal, label)
+                    }
+
+                    if (currentFrames != null && fpsVal != null) {
+                        val syncIntent = Intent(ACTION_FPS_UPDATE).apply {
+                            putExtra("fps", fpsStr)
+                        }
+                        sendBroadcast(syncIntent)
                     }
                 }
             } catch (_: InterruptedException) {
