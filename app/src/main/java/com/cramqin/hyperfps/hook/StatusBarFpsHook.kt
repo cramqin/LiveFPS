@@ -66,7 +66,7 @@ object StatusBarFpsHook {
     private val leftViews = CopyOnWriteArrayList<View>()
     private val rightViews = CopyOnWriteArrayList<View>()
     private val clockCache = Collections.synchronizedMap(WeakHashMap<View, WeakReference<TextView>>())
-    private val layoutListenersAttached = Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap<View, Boolean>()))
+    private val dynamicAlignmentListeners = Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap<View, Boolean>()))
     @Volatile private var cachedClockRef: WeakReference<TextView>? = null
     @Volatile private var receiverRegistered = false
 
@@ -409,24 +409,16 @@ object StatusBarFpsHook {
     ): Pair<ViewGroup?, View?> {
         val res = context.resources
 
-        // 1. Primary Target: MiuiStatusIconContainer (id: statusIcons)
-        // This LinearLayout directly contains all right-side status icons:
-        // HyperCeiler's BatteryDetailIndicator (39.2°C), NetworkSpeedView, WiFi, Bluetooth, signals, etc.
-        // Inserting at index 0 makes HyperFPS the leftmost icon of the cluster with zero gap!
-        val statusIconsId = res.getIdentifier("statusIcons", "id", PKG_SYSTEMUI)
-        val statusIcons = (if (statusIconsId != 0) scopeView?.findViewById<ViewGroup>(statusIconsId) else null)
-            ?: (findViewByClassName(scopeView, "MiuiStatusIconContainer") as? ViewGroup)
-        if (statusIcons != null) {
-            var firstVisibleChild: View? = null
-            for (i in 0 until statusIcons.childCount) {
-                val child = statusIcons.getChildAt(i)
-                if (child.tag == TAG_RIGHT) continue
-                if (child.visibility == View.VISIBLE && (child.width > 0 || child.measuredWidth > 0)) {
-                    firstVisibleChild = child
-                    break
-                }
+        // 1. Homescreen status bar: Find MiuiNotificationStatusContainer
+        val notifContainer = findViewByClassName(scopeView, "MiuiNotificationStatusContainer")
+        if (notifContainer != null) {
+            val parent = notifContainer.parent as? ViewGroup
+            if (parent is LinearLayout) {
+                return Pair(parent, notifContainer)
             }
-            return Pair(statusIcons, firstVisibleChild ?: (if (statusIcons.childCount > 0) statusIcons.getChildAt(0) else null))
+            if (parent != null) {
+                return Pair(parent, notifContainer)
+            }
         }
 
         // 2. Lockscreen status bar (keyguard_status_bar): status_icon_area (LinearLayout)
@@ -438,23 +430,31 @@ object StatusBarFpsHook {
         }
 
         // 3. Fallback: Find MiuiStatusBatteryContainer
-        val batteryContainer = findViewByClassName(scopeView, "MiuiStatusBatteryContainer") as? ViewGroup
+        val batteryContainer = findViewByClassName(scopeView, "MiuiStatusBatteryContainer")
         if (batteryContainer != null) {
             val parent = batteryContainer.parent as? ViewGroup
+            val grandParent = parent?.parent as? ViewGroup
+            if (grandParent is LinearLayout) {
+                return Pair(grandParent, parent)
+            }
             if (parent is LinearLayout) {
                 return Pair(parent, batteryContainer)
             }
-            return Pair(batteryContainer, null)
+            if (grandParent != null) {
+                return Pair(grandParent, parent)
+            }
+            if (parent != null) {
+                return Pair(parent, null)
+            }
         }
 
-        // 4. Fallback: Find MiuiNotificationStatusContainer
-        val notifContainer = findViewByClassName(scopeView, "MiuiNotificationStatusContainer") as? ViewGroup
-        if (notifContainer != null) {
-            val parent = notifContainer.parent as? ViewGroup
-            if (parent is LinearLayout) {
-                return Pair(parent, notifContainer)
-            }
-            return Pair(notifContainer, null)
+        // 4. Alternate status bar layout: status_icons_container
+        val statusIconsContainerId = res.getIdentifier("status_icons_container", "id", PKG_SYSTEMUI)
+        val statusIconsContainer = if (statusIconsContainerId != 0) scopeView?.findViewById<ViewGroup>(statusIconsContainerId) else null
+        if (statusIconsContainer != null) {
+            val parent = statusIconsContainer.parent as? ViewGroup
+            if (parent is LinearLayout) return Pair(parent, statusIconsContainer)
+            return Pair(statusIconsContainer, null)
         }
 
         return Pair(fallbackEndSide, null)
@@ -496,18 +496,8 @@ object StatusBarFpsHook {
         anchorChild: View?
     ) {
         val container = targetContainer ?: return
-
-        // Clean up any old TAG_RIGHT views attached to other (e.g. outer row) containers
-        container.rootView?.let { root ->
-            val oldViews = mutableListOf<View>()
-            findViewsByTag(root, TAG_RIGHT, oldViews)
-            for (ov in oldViews) {
-                if (ov.parent !== container) {
-                    (ov.parent as? ViewGroup)?.removeView(ov)
-                    targetList.remove(ov)
-                }
-            }
-        }
+        container.clipChildren = false
+        (container.parent as? ViewGroup)?.clipChildren = false
 
         val desiredIndex = if (anchorChild != null && anchorChild.parent === container) {
             container.indexOfChild(anchorChild).coerceIn(0, container.childCount)
@@ -526,7 +516,7 @@ object StatusBarFpsHook {
             if (!targetList.contains(existing)) targetList.add(existing)
             syncColorWithClock(existing)
             applyStyleToView(existing)
-            attachContainerLayoutListener(container)
+            setupDynamicAlignment(existing, anchorChild)
             return
         }
 
@@ -537,39 +527,151 @@ object StatusBarFpsHook {
         targetList.add(fpsView)
         syncColorWithClock(fpsView)
         Log.i(TAG, "Injected $TAG_RIGHT into right container $container at index $desiredIndex (before anchor $anchorChild)")
-        attachContainerLayoutListener(container)
+        setupDynamicAlignment(fpsView, anchorChild)
         updateVisibilities()
     }
 
-    private fun attachContainerLayoutListener(container: ViewGroup) {
-        if (!layoutListenersAttached.add(container)) return
-        container.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            val rightView = container.findViewWithTag<View>(TAG_RIGHT) ?: return@addOnLayoutChangeListener
-            var firstVisibleIndex = 0
-            for (i in 0 until container.childCount) {
-                val child = container.getChildAt(i)
-                if (child === rightView) continue
-                if (child.visibility == View.VISIBLE && (child.width > 0 || child.measuredWidth > 0)) {
-                    firstVisibleIndex = i
-                    break
+    private fun setupDynamicAlignment(fpsView: View, anchorChild: View?) {
+        if (!dynamicAlignmentListeners.add(fpsView)) return
+
+        fpsView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateRightViewDynamicOffset(fpsView)
+        }
+
+        (fpsView.parent as? ViewGroup)?.let { parent ->
+            if (dynamicAlignmentListeners.add(parent)) {
+                parent.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    updateRightViewDynamicOffset(fpsView)
                 }
             }
-            val currentIndex = container.indexOfChild(rightView)
-            if (currentIndex > firstVisibleIndex) {
-                container.removeView(rightView)
-                container.addView(rightView, firstVisibleIndex.coerceIn(0, container.childCount))
-                Log.i(TAG, "Dynamically re-anchored $TAG_RIGHT to index $firstVisibleIndex on layout change")
+        }
+
+        (anchorChild as? ViewGroup)?.let { anchor ->
+            if (dynamicAlignmentListeners.add(anchor)) {
+                anchor.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    updateRightViewDynamicOffset(fpsView)
+                }
             }
+        }
+
+        val root = fpsView.rootView
+        if (root != null) {
+            val statusIcons = (findViewByClassName(root, "MiuiStatusIconContainer") as? ViewGroup)
+                ?: (findViewByClassName(root, "StatusIconContainer") as? ViewGroup)
+            statusIcons?.let { si ->
+                if (dynamicAlignmentListeners.add(si)) {
+                    si.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                        updateRightViewDynamicOffset(fpsView)
+                    }
+                }
+            }
+
+            val batteryContainer = findViewByClassName(root, "MiuiStatusBatteryContainer") as? ViewGroup
+            batteryContainer?.let { bc ->
+                if (dynamicAlignmentListeners.add(bc)) {
+                    bc.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                        updateRightViewDynamicOffset(fpsView)
+                    }
+                }
+            }
+        }
+
+        fpsView.post {
+            updateRightViewDynamicOffset(fpsView)
         }
     }
 
-    private fun findViewsByTag(root: View?, tag: Any, out: MutableList<View>) {
-        if (root == null) return
-        if (root.tag == tag) out.add(root)
-        if (root is ViewGroup) {
-            for (i in 0 until root.childCount) {
-                findViewsByTag(root.getChildAt(i), tag, out)
+    private fun collectCandidateIcons(root: View, screenWidth: Int): List<View> {
+        val icons = mutableListOf<View>()
+        val halfScreen = (screenWidth * 0.48f).toInt()
+
+        fun checkAndAdd(view: View) {
+            if (view.visibility != View.VISIBLE || view.alpha < 0.1f || view.width <= 0) return
+            if (view.tag == TAG_RIGHT || view.tag == TAG_LEFT) return
+            val loc = IntArray(2)
+            view.getLocationOnScreen(loc)
+            if (loc[0] >= halfScreen && loc[0] < screenWidth) {
+                icons.add(view)
             }
+        }
+
+        fun inspectContainer(container: ViewGroup?) {
+            if (container == null || container.visibility != View.VISIBLE) return
+            for (i in 0 until container.childCount) {
+                val child = container.getChildAt(i) ?: continue
+                if (child.visibility != View.VISIBLE || child.alpha < 0.1f || child.width <= 0) continue
+                if (child.tag == TAG_RIGHT || child.tag == TAG_LEFT) continue
+
+                val cName = child.javaClass.simpleName
+                if (child is ViewGroup && (cName.contains("Container") || cName.contains("Area"))) {
+                    for (j in 0 until child.childCount) {
+                        val sub = child.getChildAt(j) ?: continue
+                        checkAndAdd(sub)
+                    }
+                } else {
+                    checkAndAdd(child)
+                }
+            }
+        }
+
+        // 1. Status icons container
+        val statusIcons = (findViewByClassName(root, "MiuiStatusIconContainer") as? ViewGroup)
+            ?: (findViewByClassName(root, "StatusIconContainer") as? ViewGroup)
+            ?: (root.resources?.getIdentifier("statusIcons", "id", PKG_SYSTEMUI)?.let { id -> if (id != 0) root.findViewById<ViewGroup>(id) else null })
+        inspectContainer(statusIcons)
+
+        // 2. Battery container
+        val batteryContainer = (findViewByClassName(root, "MiuiStatusBatteryContainer") as? ViewGroup)
+            ?: (root.resources?.getIdentifier("battery", "id", PKG_SYSTEMUI)?.let { id -> if (id != 0) root.findViewById<ViewGroup>(id) else null })
+        inspectContainer(batteryContainer)
+
+        // 3. Notification status container
+        val notifContainer = findViewByClassName(root, "MiuiNotificationStatusContainer") as? ViewGroup
+        inspectContainer(notifContainer)
+
+        // 4. Lockscreen area
+        val lockAreaId = root.resources?.getIdentifier("status_icon_area", "id", PKG_SYSTEMUI) ?: 0
+        if (lockAreaId != 0) {
+            inspectContainer(root.findViewById<ViewGroup>(lockAreaId))
+        }
+
+        return icons
+    }
+
+    private fun updateRightViewDynamicOffset(fpsView: View) {
+        if (!isEnabled || currentPosition != "right") return
+        if (fpsView.visibility != View.VISIBLE || fpsView.width <= 0 || !fpsView.isAttachedToWindow) return
+        val root = fpsView.rootView ?: return
+        val screenWidth = root.width.takeIf { it > 0 } ?: fpsView.resources.displayMetrics.widthPixels
+
+        val candidateIcons = collectCandidateIcons(root, screenWidth)
+        if (candidateIcons.isEmpty()) return
+
+        val loc = IntArray(2)
+        var minIconX: Int? = null
+        for (icon in candidateIcons) {
+            icon.getLocationOnScreen(loc)
+            val x = loc[0]
+            if (minIconX == null || x < minIconX) {
+                minIconX = x
+            }
+        }
+
+        if (minIconX == null) return
+
+        val fpsLoc = IntArray(2)
+        fpsView.getLocationOnScreen(fpsLoc)
+        val curScreenX = fpsLoc[0]
+        val baseScreenX = curScreenX - fpsView.translationX
+
+        val density = fpsView.resources.displayMetrics.density
+        val gapPx = (maxOf(statusBarMarginRight, 2) * density).toInt()
+
+        val targetLeft = minIconX - gapPx - fpsView.width
+        val desiredTranslationX = (targetLeft - baseScreenX).toFloat()
+
+        if (java.lang.Math.abs(fpsView.translationX - desiredTranslationX) > 0.5f) {
+            fpsView.translationX = desiredTranslationX
         }
     }
 
@@ -615,16 +717,34 @@ object StatusBarFpsHook {
         tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, statusBarFontSize)
         tv.typeface = resolveStatusBarTypeface()
         tv.translationY = statusBarVerticalOffset * density
-        tv.setPaddingRelative(leftPx, 0, rightPx, 0)
+
+        if (tv.tag == TAG_RIGHT) {
+            tv.setPaddingRelative(0, 0, 0, 0)
+        } else {
+            tv.setPaddingRelative(leftPx, 0, rightPx, 0)
+        }
 
         val lp = tv.layoutParams as? ViewGroup.MarginLayoutParams
-        if (lp != null && (lp.leftMargin != leftPx || lp.rightMargin != rightPx)) {
-            lp.leftMargin = leftPx
-            lp.rightMargin = rightPx
-            tv.layoutParams = lp
+        if (lp != null) {
+            if (tv.tag == TAG_RIGHT) {
+                if (lp.leftMargin != 0 || lp.rightMargin != 0) {
+                    lp.leftMargin = 0
+                    lp.rightMargin = 0
+                    tv.layoutParams = lp
+                }
+            } else {
+                if (lp.leftMargin != leftPx || lp.rightMargin != rightPx) {
+                    lp.leftMargin = leftPx
+                    lp.rightMargin = rightPx
+                    tv.layoutParams = lp
+                }
+            }
         }
         syncColorWithClock(tv)
         tv.requestLayout()
+        if (tv.tag == TAG_RIGHT) {
+            tv.post { updateRightViewDynamicOffset(tv) }
+        }
     }
 
     private fun setupClockColorSync(module: XposedModule, classLoader: ClassLoader) {
@@ -685,7 +805,7 @@ object StatusBarFpsHook {
         }
 
         val (rightContainer, anchorChild) = resolveRightTarget(scope, context, null)
-        if (rightContainer != null) {
+        if (rightContainer != null && rightContainer.findViewWithTag<View>(TAG_RIGHT) == null) {
             injectToRightContainer(rightViews, context, rightContainer, anchorChild)
         }
     }
@@ -773,6 +893,7 @@ object StatusBarFpsHook {
                 if (show) {
                     syncColorWithClock(tv)
                     tv.alpha = 1.0f
+                    tv.post { updateRightViewDynamicOffset(tv) }
                 }
             }
         }
@@ -788,6 +909,9 @@ object StatusBarFpsHook {
             }
             applyStyleToView(tv)
             syncColorWithClock(tv, null)
+            if (tv.tag == TAG_RIGHT) {
+                tv.post { updateRightViewDynamicOffset(tv) }
+            }
         }
     }
 
