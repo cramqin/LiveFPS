@@ -66,6 +66,7 @@ object StatusBarFpsHook {
     private val leftViews = CopyOnWriteArrayList<View>()
     private val rightViews = CopyOnWriteArrayList<View>()
     private val clockCache = Collections.synchronizedMap(WeakHashMap<View, WeakReference<TextView>>())
+    private val layoutListenersAttached = Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap<View, Boolean>()))
     @Volatile private var cachedClockRef: WeakReference<TextView>? = null
     @Volatile private var receiverRegistered = false
 
@@ -408,16 +409,24 @@ object StatusBarFpsHook {
     ): Pair<ViewGroup?, View?> {
         val res = context.resources
 
-        // 1. Homescreen status bar: Find MiuiNotificationStatusContainer
-        val notifContainer = findViewByClassName(scopeView, "MiuiNotificationStatusContainer")
-        if (notifContainer != null) {
-            val parent = notifContainer.parent as? ViewGroup
-            if (parent is LinearLayout) {
-                return Pair(parent, notifContainer)
+        // 1. Primary Target: MiuiStatusIconContainer (id: statusIcons)
+        // This LinearLayout directly contains all right-side status icons:
+        // HyperCeiler's BatteryDetailIndicator (39.2°C), NetworkSpeedView, WiFi, Bluetooth, signals, etc.
+        // Inserting at index 0 makes HyperFPS the leftmost icon of the cluster with zero gap!
+        val statusIconsId = res.getIdentifier("statusIcons", "id", PKG_SYSTEMUI)
+        val statusIcons = (if (statusIconsId != 0) scopeView?.findViewById<ViewGroup>(statusIconsId) else null)
+            ?: (findViewByClassName(scopeView, "MiuiStatusIconContainer") as? ViewGroup)
+        if (statusIcons != null) {
+            var firstVisibleChild: View? = null
+            for (i in 0 until statusIcons.childCount) {
+                val child = statusIcons.getChildAt(i)
+                if (child.tag == TAG_RIGHT) continue
+                if (child.visibility == View.VISIBLE && (child.width > 0 || child.measuredWidth > 0)) {
+                    firstVisibleChild = child
+                    break
+                }
             }
-            if (parent != null) {
-                return Pair(parent, notifContainer)
-            }
+            return Pair(statusIcons, firstVisibleChild ?: (if (statusIcons.childCount > 0) statusIcons.getChildAt(0) else null))
         }
 
         // 2. Lockscreen status bar (keyguard_status_bar): status_icon_area (LinearLayout)
@@ -429,31 +438,23 @@ object StatusBarFpsHook {
         }
 
         // 3. Fallback: Find MiuiStatusBatteryContainer
-        val batteryContainer = findViewByClassName(scopeView, "MiuiStatusBatteryContainer")
+        val batteryContainer = findViewByClassName(scopeView, "MiuiStatusBatteryContainer") as? ViewGroup
         if (batteryContainer != null) {
             val parent = batteryContainer.parent as? ViewGroup
-            val grandParent = parent?.parent as? ViewGroup
-            if (grandParent is LinearLayout) {
-                return Pair(grandParent, parent)
-            }
             if (parent is LinearLayout) {
                 return Pair(parent, batteryContainer)
             }
-            if (grandParent != null) {
-                return Pair(grandParent, parent)
-            }
-            if (parent != null) {
-                return Pair(parent, null)
-            }
+            return Pair(batteryContainer, null)
         }
 
-        // 4. Alternate status bar layout: status_icons_container
-        val statusIconsContainerId = res.getIdentifier("status_icons_container", "id", PKG_SYSTEMUI)
-        val statusIconsContainer = if (statusIconsContainerId != 0) scopeView?.findViewById<ViewGroup>(statusIconsContainerId) else null
-        if (statusIconsContainer != null) {
-            val parent = statusIconsContainer.parent as? ViewGroup
-            if (parent is LinearLayout) return Pair(parent, statusIconsContainer)
-            return Pair(statusIconsContainer, null)
+        // 4. Fallback: Find MiuiNotificationStatusContainer
+        val notifContainer = findViewByClassName(scopeView, "MiuiNotificationStatusContainer") as? ViewGroup
+        if (notifContainer != null) {
+            val parent = notifContainer.parent as? ViewGroup
+            if (parent is LinearLayout) {
+                return Pair(parent, notifContainer)
+            }
+            return Pair(notifContainer, null)
         }
 
         return Pair(fallbackEndSide, null)
@@ -495,6 +496,19 @@ object StatusBarFpsHook {
         anchorChild: View?
     ) {
         val container = targetContainer ?: return
+
+        // Clean up any old TAG_RIGHT views attached to other (e.g. outer row) containers
+        container.rootView?.let { root ->
+            val oldViews = mutableListOf<View>()
+            findViewsByTag(root, TAG_RIGHT, oldViews)
+            for (ov in oldViews) {
+                if (ov.parent !== container) {
+                    (ov.parent as? ViewGroup)?.removeView(ov)
+                    targetList.remove(ov)
+                }
+            }
+        }
+
         val desiredIndex = if (anchorChild != null && anchorChild.parent === container) {
             container.indexOfChild(anchorChild).coerceIn(0, container.childCount)
         } else {
@@ -512,6 +526,7 @@ object StatusBarFpsHook {
             if (!targetList.contains(existing)) targetList.add(existing)
             syncColorWithClock(existing)
             applyStyleToView(existing)
+            attachContainerLayoutListener(container)
             return
         }
 
@@ -522,7 +537,40 @@ object StatusBarFpsHook {
         targetList.add(fpsView)
         syncColorWithClock(fpsView)
         Log.i(TAG, "Injected $TAG_RIGHT into right container $container at index $desiredIndex (before anchor $anchorChild)")
+        attachContainerLayoutListener(container)
         updateVisibilities()
+    }
+
+    private fun attachContainerLayoutListener(container: ViewGroup) {
+        if (!layoutListenersAttached.add(container)) return
+        container.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val rightView = container.findViewWithTag<View>(TAG_RIGHT) ?: return@addOnLayoutChangeListener
+            var firstVisibleIndex = 0
+            for (i in 0 until container.childCount) {
+                val child = container.getChildAt(i)
+                if (child === rightView) continue
+                if (child.visibility == View.VISIBLE && (child.width > 0 || child.measuredWidth > 0)) {
+                    firstVisibleIndex = i
+                    break
+                }
+            }
+            val currentIndex = container.indexOfChild(rightView)
+            if (currentIndex > firstVisibleIndex) {
+                container.removeView(rightView)
+                container.addView(rightView, firstVisibleIndex.coerceIn(0, container.childCount))
+                Log.i(TAG, "Dynamically re-anchored $TAG_RIGHT to index $firstVisibleIndex on layout change")
+            }
+        }
+    }
+
+    private fun findViewsByTag(root: View?, tag: Any, out: MutableList<View>) {
+        if (root == null) return
+        if (root.tag == tag) out.add(root)
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                findViewsByTag(root.getChildAt(i), tag, out)
+            }
+        }
     }
 
     private fun createFpsTextView(context: Context, lp: ViewGroup.LayoutParams): TextView {
@@ -637,7 +685,7 @@ object StatusBarFpsHook {
         }
 
         val (rightContainer, anchorChild) = resolveRightTarget(scope, context, null)
-        if (rightContainer != null && rightContainer.findViewWithTag<View>(TAG_RIGHT) == null) {
+        if (rightContainer != null) {
             injectToRightContainer(rightViews, context, rightContainer, anchorChild)
         }
     }
