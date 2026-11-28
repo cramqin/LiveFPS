@@ -43,7 +43,6 @@ class MainActivity : Activity() {
         const val KEY_STATUSBAR_POSITION = "statusbar_position"
         const val KEY_STATUSBAR_FONT_SIZE = "statusbar_font_size"
         const val KEY_STATUSBAR_BOLD = "statusbar_bold"
-        const val KEY_STATUSBAR_COLOR = "statusbar_color"
         const val KEY_STATUSBAR_MARGIN_LEFT = "statusbar_margin_left"
         const val KEY_STATUSBAR_MARGIN_RIGHT = "statusbar_margin_right"
         const val KEY_STATUSBAR_VERTICAL_OFFSET = "statusbar_vertical_offset"
@@ -79,8 +78,6 @@ class MainActivity : Activity() {
 
     private lateinit var fontSizeValView: TextView
     private lateinit var boldToggleBtn: TextView
-    private lateinit var statusBarColorSwatch: View
-    private lateinit var statusBarColorValView: TextView
     private lateinit var marginLeftValView: TextView
     private lateinit var marginRightValView: TextView
     private lateinit var vertOffsetValView: TextView
@@ -89,7 +86,6 @@ class MainActivity : Activity() {
     private var statusBarPosition = "right"
     private var statusBarFontSize = 11f
     private var statusBarBold = true
-    private var statusBarColor = "#FFFFFF"
     private var statusBarMarginLeft = 1
     private var statusBarMarginRight = 1
     private var statusBarVerticalOffset = 0
@@ -153,7 +149,6 @@ class MainActivity : Activity() {
         statusBarPosition = prefs.getString(KEY_STATUSBAR_POSITION, "right") ?: "right"
         statusBarFontSize = prefs.getFloat(KEY_STATUSBAR_FONT_SIZE, 11f)
         statusBarBold = prefs.getBoolean(KEY_STATUSBAR_BOLD, true)
-        statusBarColor = prefs.getString(KEY_STATUSBAR_COLOR, "#FFFFFF") ?: "#FFFFFF"
         statusBarMarginLeft = prefs.getInt(KEY_STATUSBAR_MARGIN_LEFT, 1)
         statusBarMarginRight = prefs.getInt(KEY_STATUSBAR_MARGIN_RIGHT, 1)
         statusBarVerticalOffset = prefs.getInt(KEY_STATUSBAR_VERTICAL_OFFSET, 0)
@@ -172,7 +167,6 @@ class MainActivity : Activity() {
                         putString(KEY_STATUSBAR_POSITION, statusBarPosition)
                         putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize)
                         putBoolean(KEY_STATUSBAR_BOLD, statusBarBold)
-                        putString(KEY_STATUSBAR_COLOR, statusBarColor)
                         putInt(KEY_STATUSBAR_MARGIN_LEFT, statusBarMarginLeft)
                         putInt(KEY_STATUSBAR_MARGIN_RIGHT, statusBarMarginRight)
                         putInt(KEY_STATUSBAR_VERTICAL_OFFSET, statusBarVerticalOffset)
@@ -696,7 +690,6 @@ class MainActivity : Activity() {
             setOnClickListener {
                 statusBarFontSize = 11f
                 statusBarBold = true
-                statusBarColor = "#FFFFFF"
                 statusBarMarginLeft = 1
                 statusBarMarginRight = 1
                 statusBarVerticalOffset = 0
@@ -705,7 +698,6 @@ class MainActivity : Activity() {
                 savePrefsAndWorldReadable {
                     putFloat(KEY_STATUSBAR_FONT_SIZE, statusBarFontSize)
                     putBoolean(KEY_STATUSBAR_BOLD, statusBarBold)
-                    putString(KEY_STATUSBAR_COLOR, statusBarColor)
                     putInt(KEY_STATUSBAR_MARGIN_LEFT, statusBarMarginLeft)
                     putInt(KEY_STATUSBAR_MARGIN_RIGHT, statusBarMarginRight)
                     putInt(KEY_STATUSBAR_VERTICAL_OFFSET, statusBarVerticalOffset)
@@ -799,109 +791,7 @@ class MainActivity : Activity() {
         boldToggleBtn = boldBtn
         customBox.addView(boldRow)
 
-        // 4. Color Picker
-        customBox.addView(buildSubHeader("COLOR"))
-        val colorRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4f), 0, dp(4f))
-            val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            layoutParams = lp
-        }
 
-        val colorLabel = TextView(this).apply {
-            text = "Text Color"
-            textSize = 12f
-            setTextColor(Color.parseColor("#E0E0E0"))
-            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            layoutParams = lp
-        }
-        colorRow.addView(colorLabel)
-
-        val colorControls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        statusBarColorSwatch = View(this).apply {
-            val lp = LinearLayout.LayoutParams(dp(18f), dp(18f))
-            lp.marginEnd = dp(8f)
-            layoutParams = lp
-        }
-        colorControls.addView(statusBarColorSwatch)
-
-        statusBarColorValView = TextView(this).apply {
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.marginEnd = dp(8f)
-            layoutParams = lp
-        }
-        colorControls.addView(statusBarColorValView)
-
-        val pickColorBtn = TextView(this).apply {
-            text = "🎨 Pick"
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#121212"))
-            background = roundedBox(Color.parseColor("#00E676"), 8f)
-            setPadding(dp(10f), dp(4f), dp(10f), dp(4f))
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.marginEnd = dp(4f)
-            layoutParams = lp
-            setOnClickListener {
-                showColorPickerDialog("Pick Status Bar Color", if (statusBarColor.equals("auto", ignoreCase = true)) "#FFFFFF" else statusBarColor) { hex ->
-                    statusBarColor = hex
-                    savePrefsAndWorldReadable { putString(KEY_STATUSBAR_COLOR, statusBarColor) }
-                    refreshAppearanceUi()
-                    dispatchStatusBarConfig()
-                }
-            }
-        }
-        colorControls.addView(pickColorBtn)
-
-        val autoColorBtn = TextView(this).apply {
-            text = "Auto"
-            textSize = 11f
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#CCCCCC"))
-            background = roundedBox(Color.parseColor("#2C2C2E"), 8f, Color.parseColor("#38383A"), 1f)
-            setPadding(dp(8f), dp(4f), dp(8f), dp(4f))
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.marginEnd = dp(4f)
-            layoutParams = lp
-            setOnClickListener {
-                statusBarColor = "auto"
-                savePrefsAndWorldReadable { putString(KEY_STATUSBAR_COLOR, statusBarColor) }
-                refreshAppearanceUi()
-                dispatchStatusBarConfig()
-            }
-        }
-        colorControls.addView(autoColorBtn)
-
-        val whiteColorBtn = TextView(this).apply {
-            text = "White"
-            textSize = 11f
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#CCCCCC"))
-            background = roundedBox(Color.parseColor("#2C2C2E"), 8f, Color.parseColor("#38383A"), 1f)
-            setPadding(dp(8f), dp(4f), dp(8f), dp(4f))
-            setOnClickListener {
-                statusBarColor = "#FFFFFF"
-                savePrefsAndWorldReadable { putString(KEY_STATUSBAR_COLOR, statusBarColor) }
-                refreshAppearanceUi()
-                dispatchStatusBarConfig()
-            }
-        }
-        colorControls.addView(whiteColorBtn)
-
-        colorRow.addView(colorControls)
-        customBox.addView(colorRow)
 
         // 5. Margin Left
         val (marginLeftRow, marginLeftVal) = buildStepperRow("Left Margin", {
@@ -1124,19 +1014,6 @@ class MainActivity : Activity() {
             }
         }
 
-        if (::statusBarColorSwatch.isInitialized && ::statusBarColorValView.isInitialized) {
-            if (statusBarColor.equals("auto", ignoreCase = true)) {
-                statusBarColorSwatch.background = roundedBox(Color.GRAY, 4f)
-                statusBarColorValView.text = "AUTO"
-                statusBarColorValView.setTextColor(Color.WHITE)
-            } else {
-                val parsedCol = runCatching { Color.parseColor(statusBarColor) }.getOrDefault(Color.WHITE)
-                statusBarColorSwatch.background = roundedBox(parsedCol, 4f)
-                statusBarColorValView.text = statusBarColor.uppercase()
-                statusBarColorValView.setTextColor(parsedCol)
-            }
-        }
-
         if (::statusBarPreviewLeftView.isInitialized && ::statusBarPreviewRightView.isInitialized) {
             val density = resources.displayMetrics.density
             val leftPx = (statusBarMarginLeft * density).toInt()
@@ -1155,11 +1032,7 @@ class MainActivity : Activity() {
                 }
             }
             val resolvedTf = Typeface.create(baseTypeface, if (statusBarBold) Typeface.BOLD else Typeface.NORMAL)
-            val previewColor = if (statusBarColor.equals("auto", ignoreCase = true)) {
-                Color.WHITE
-            } else {
-                runCatching { Color.parseColor(statusBarColor) }.getOrDefault(Color.WHITE)
-            }
+            val previewColor = Color.WHITE
 
             listOf(statusBarPreviewLeftView, statusBarPreviewRightView).forEach { pv ->
                 pv.textSize = statusBarFontSize
@@ -1170,7 +1043,6 @@ class MainActivity : Activity() {
                 pv.alpha = if (isStatusBarEnabled) 1.0f else 0.45f
             }
             statusBarPreviewLeftView.visibility = if (statusBarPosition == "left") View.VISIBLE else View.GONE
-            statusBarPreviewRightView.visibility = if (statusBarPosition == "right") View.VISIBLE else View.GONE
         }
     }
 
@@ -1252,36 +1124,35 @@ class MainActivity : Activity() {
                 put("statusbar_position", statusBarPosition)
                 put("statusbar_font_size", statusBarFontSize.toDouble())
                 put("statusbar_bold", statusBarBold)
-                put("statusbar_color", statusBarColor)
                 put("statusbar_margin_left", statusBarMarginLeft)
                 put("statusbar_margin_right", statusBarMarginRight)
                 put("statusbar_vertical_offset", statusBarVerticalOffset)
                 put("statusbar_font", statusBarFont)
                 put("statusbar_custom_font_path", statusBarCustomFontPath)
             }
-            val tmpFile = java.io.File("/data/local/tmp/hyperfps_config.json")
-            tmpFile.writeText(json.toString())
-            tmpFile.setReadable(true, false)
-            tmpFile.setWritable(true, false)
 
             val dataDir = applicationInfo.dataDir
             val dataDirFile = java.io.File(dataDir)
             dataDirFile.setReadable(true, false)
             dataDirFile.setExecutable(true, false)
 
-            val spDir = java.io.File(dataDir, "shared_prefs")
-            spDir.setReadable(true, false)
-            spDir.setExecutable(true, false)
-
-            val xmlFile = java.io.File(spDir, "$PREFS_NAME.xml")
-            if (xmlFile.exists()) xmlFile.setReadable(true, false)
-
             val filesDir = java.io.File(dataDir, "files").apply { mkdirs() }
             filesDir.setReadable(true, false)
             filesDir.setExecutable(true, false)
-            java.io.File(filesDir, "hyperfps_config.json").apply {
-                writeText(json.toString())
-                setReadable(true, false)
+            val appConfigFile = java.io.File(filesDir, "hyperfps_config.json")
+            appConfigFile.writeText(json.toString())
+            appConfigFile.setReadable(true, false)
+
+            val spDir = java.io.File(dataDir, "shared_prefs")
+            spDir.setReadable(true, false)
+            spDir.setExecutable(true, false)
+            val xmlFile = java.io.File(spDir, "$PREFS_NAME.xml")
+            if (xmlFile.exists()) xmlFile.setReadable(true, false)
+
+            val tmpFile = java.io.File("/data/local/tmp/hyperfps_config.json")
+            runCatching {
+                tmpFile.writeText(json.toString())
+                tmpFile.setReadable(true, false)
             }
         }
     }
@@ -1323,7 +1194,6 @@ class MainActivity : Activity() {
             putExtra("interval_ms", 2000L) // Fixed 2.0s polling rate for status bar
             putExtra("font_size", statusBarFontSize)
             putExtra("bold", statusBarBold)
-            putExtra("color", statusBarColor)
             putExtra("margin_left", statusBarMarginLeft)
             putExtra("margin_right", statusBarMarginRight)
             putExtra("vertical_offset", statusBarVerticalOffset)

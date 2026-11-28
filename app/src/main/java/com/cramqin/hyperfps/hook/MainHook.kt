@@ -8,6 +8,8 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam
 
 class MainHook : XposedModule() {
 
+    @Volatile private var statusBarHookInited = false
+
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         super.onModuleLoaded(param)
         Log.i("HyperFPS", "MainHook onModuleLoaded: process=${param.processName}")
@@ -25,14 +27,16 @@ class MainHook : XposedModule() {
 
     override fun onPackageReady(param: PackageReadyParam) {
         super.onPackageReady(param)
-        Log.i("HyperFPS", "MainHook onPackageReady: pkg=${param.packageName}")
-        if (!param.isFirstPackage) return
+        Log.i("HyperFPS", "MainHook onPackageReady: pkg=${param.packageName}, isFirst=${param.isFirstPackage}")
         when (param.packageName) {
             "com.android.systemui", "miui.systemui.plugin" -> {
-                runCatching {
-                    StatusBarFpsHook.init(this, param.classLoader)
-                }.onFailure {
-                    Log.e("HyperFPS", "Failed to init StatusBarFpsHook", it)
+                if (!statusBarHookInited) {
+                    statusBarHookInited = true
+                    runCatching {
+                        StatusBarFpsHook.init(this, param.classLoader)
+                    }.onFailure {
+                        Log.e("HyperFPS", "Failed to init StatusBarFpsHook", it)
+                    }
                 }
             }
         }
