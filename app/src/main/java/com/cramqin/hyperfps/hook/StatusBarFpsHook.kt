@@ -73,8 +73,8 @@ object StatusBarFpsHook {
     @Volatile private var currentPosition = "right"
     @Volatile private var statusBarFontSize = 11f
     @Volatile private var statusBarBold = true
-    @Volatile private var statusBarMarginLeft = 1
-    @Volatile private var statusBarMarginRight = 1
+    @Volatile private var statusBarMarginLeft = 2
+    @Volatile private var statusBarMarginRight = 3
     @Volatile private var statusBarVerticalOffset = 0
     @Volatile private var statusBarFont = "default"
     @Volatile private var statusBarCustomFontPath = ""
@@ -424,7 +424,8 @@ object StatusBarFpsHook {
         val statusIconAreaId = res.getIdentifier("status_icon_area", "id", PKG_SYSTEMUI)
         val statusIconArea = if (statusIconAreaId != 0) scopeView?.findViewById<ViewGroup>(statusIconAreaId) else null
         if (statusIconArea != null) {
-            return Pair(statusIconArea, null)
+            val systemIcons = statusIconArea.findViewById<View>(res.getIdentifier("system_icons", "id", PKG_SYSTEMUI))
+            return Pair(statusIconArea, systemIcons ?: (if (statusIconArea.childCount > 0) statusIconArea.getChildAt(0) else null))
         }
 
         // 3. Fallback: Find MiuiStatusBatteryContainer
@@ -494,25 +495,33 @@ object StatusBarFpsHook {
         anchorChild: View?
     ) {
         val container = targetContainer ?: return
+        val desiredIndex = if (anchorChild != null && anchorChild.parent === container) {
+            container.indexOfChild(anchorChild).coerceIn(0, container.childCount)
+        } else {
+            0
+        }
+
         val existing = container.findViewWithTag<View>(TAG_RIGHT)
         if (existing != null) {
+            val currentIndex = container.indexOfChild(existing)
+            if (currentIndex != desiredIndex && desiredIndex >= 0) {
+                container.removeView(existing)
+                container.addView(existing, desiredIndex.coerceIn(0, container.childCount))
+                Log.i(TAG, "Re-positioned $TAG_RIGHT in $container to index $desiredIndex (before anchor $anchorChild)")
+            }
             if (!targetList.contains(existing)) targetList.add(existing)
             syncColorWithClock(existing)
+            applyStyleToView(existing)
             return
         }
 
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
         val fpsView = createFpsTextView(context, lp).apply { tag = TAG_RIGHT }
 
-        val index = if (anchorChild != null && anchorChild.parent === container) {
-            (container.indexOfChild(anchorChild) + 1).coerceIn(0, container.childCount)
-        } else {
-            container.childCount
-        }
-        container.addView(fpsView, index)
+        container.addView(fpsView, desiredIndex)
         targetList.add(fpsView)
         syncColorWithClock(fpsView)
-        Log.i(TAG, "Injected $TAG_RIGHT into right container $container at index $index")
+        Log.i(TAG, "Injected $TAG_RIGHT into right container $container at index $desiredIndex (before anchor $anchorChild)")
         updateVisibilities()
     }
 
@@ -547,8 +556,13 @@ object StatusBarFpsHook {
     private fun applyStyleToView(view: View) {
         val tv = view as? TextView ?: return
         val density = tv.resources?.displayMetrics?.density ?: 2.75f
-        val leftPx = (statusBarMarginLeft * density).toInt()
-        val rightPx = (statusBarMarginRight * density).toInt()
+        val isKeyguard = tv.rootView?.javaClass?.name?.contains("Keyguard", ignoreCase = true) == true
+            || tv.parent?.javaClass?.name?.contains("Keyguard", ignoreCase = true) == true
+        val safeLeftMargin = if (isKeyguard && tv.tag == TAG_RIGHT) maxOf(statusBarMarginLeft, 10) else statusBarMarginLeft
+        val safeRightMargin = maxOf(statusBarMarginRight, 2)
+
+        val leftPx = (safeLeftMargin * density).toInt()
+        val rightPx = (safeRightMargin * density).toInt()
 
         tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, statusBarFontSize)
         tv.typeface = resolveStatusBarTypeface()
@@ -739,27 +753,27 @@ object StatusBarFpsHook {
 
             override fun handleMessage(msg: Message) {
                 if (msg.what == MSG_WORKER_TICK) {
-                    processTick()
+                    val nextDelay = processTick()
                     removeMessages(MSG_WORKER_TICK)
-                    sendEmptyMessageDelayed(MSG_WORKER_TICK, STATUSBAR_POLL_INTERVAL_MS)
+                    sendEmptyMessageDelayed(MSG_WORKER_TICK, nextDelay)
                 }
             }
 
-            private fun processTick() {
+            private fun processTick(): Long {
                 val sampleView = leftViews.firstOrNull() ?: rightViews.firstOrNull()
                 val context = sampleView?.context
                 val powerManager = context?.getSystemService(Context.POWER_SERVICE) as? PowerManager
                 val isScreenOn = powerManager?.isInteractive ?: true
 
                 if (!isEnabled || !isScreenOn) {
-                    return
+                    return STATUSBAR_POLL_INTERVAL_MS
                 }
 
                 val nowMs = SystemClock.elapsedRealtime()
                 if (nowMs - lastOverlaySyncTime < 3500L) {
                     // Floating overlay is running and actively broadcasting synchronized FPS every 2s.
                     // Skip redundant dumpsys to preserve resources and maintain lockstep sync.
-                    return
+                    return STATUSBAR_POLL_INTERVAL_MS
                 }
 
                 ensureTimestatsEnabled()
@@ -777,12 +791,19 @@ object StatusBarFpsHook {
                         }
                     }
                     if (currentFrames != null) {
+                        val wasFirst = lastFrames < 0
                         lastFrames = currentFrames
+                        lastNanos = now
+                        if (wasFirst) {
+                            return 400L
+                        }
+                    } else {
+                        lastNanos = now
                     }
-                    lastNanos = now
                 } catch (e: Exception) {
                     Log.e(TAG, "StatusBarFpsHook worker error", e)
                 }
+                return STATUSBAR_POLL_INTERVAL_MS
             }
         }
         workerHandler?.sendEmptyMessage(MSG_WORKER_TICK)
