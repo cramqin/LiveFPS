@@ -556,9 +556,7 @@ object StatusBarFpsHook {
 
         val root = fpsView.rootView
         if (root != null) {
-            val statusIcons = (findViewByClassName(root, "MiuiStatusIconContainer") as? ViewGroup)
-                ?: (findViewByClassName(root, "StatusIconContainer") as? ViewGroup)
-            statusIcons?.let { si ->
+            findStatusIconsContainer(root)?.let { si ->
                 if (dynamicAlignmentListeners.add(si)) {
                     si.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                         updateRightViewDynamicOffset(fpsView)
@@ -566,8 +564,7 @@ object StatusBarFpsHook {
                 }
             }
 
-            val batteryContainer = findViewByClassName(root, "MiuiStatusBatteryContainer") as? ViewGroup
-            batteryContainer?.let { bc ->
+            findBatteryContainer(root)?.let { bc ->
                 if (dynamicAlignmentListeners.add(bc)) {
                     bc.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                         updateRightViewDynamicOffset(fpsView)
@@ -581,9 +578,29 @@ object StatusBarFpsHook {
         }
     }
 
+    private fun findStatusIconsContainer(root: View): ViewGroup? {
+        findViewByClassName(root, "MiuiStatusIconContainer")?.let { return it as? ViewGroup }
+        findViewByClassName(root, "StatusIconContainer")?.let { return it as? ViewGroup }
+        val id = root.resources?.getIdentifier("statusIcons", "id", PKG_SYSTEMUI) ?: 0
+        if (id != 0) {
+            root.findViewById<ViewGroup>(id)?.let { return it }
+        }
+        return null
+    }
+
+    private fun findBatteryContainer(root: View): ViewGroup? {
+        findViewByClassName(root, "MiuiStatusBatteryContainer")?.let { return it as? ViewGroup }
+        findViewByClassName(root, "BatteryMeterView")?.let { (it.parent as? ViewGroup)?.let { p -> return p } }
+        val id = root.resources?.getIdentifier("battery", "id", PKG_SYSTEMUI) ?: 0
+        if (id != 0) {
+            root.findViewById<ViewGroup>(id)?.let { return it }
+        }
+        return null
+    }
+
     private fun collectCandidateIcons(root: View, screenWidth: Int): List<View> {
         val icons = mutableListOf<View>()
-        val halfScreen = (screenWidth * 0.48f).toInt()
+        val halfScreen = (screenWidth * 0.45f).toInt()
 
         fun checkAndAdd(view: View) {
             if (view.visibility != View.VISIBLE || view.alpha < 0.1f || view.width <= 0) return
@@ -601,38 +618,25 @@ object StatusBarFpsHook {
                 val child = container.getChildAt(i) ?: continue
                 if (child.visibility != View.VISIBLE || child.alpha < 0.1f || child.width <= 0) continue
                 if (child.tag == TAG_RIGHT || child.tag == TAG_LEFT) continue
-
-                val cName = child.javaClass.simpleName
-                if (child is ViewGroup && (cName.contains("Container") || cName.contains("Area"))) {
-                    for (j in 0 until child.childCount) {
-                        val sub = child.getChildAt(j) ?: continue
-                        checkAndAdd(sub)
-                    }
-                } else {
-                    checkAndAdd(child)
-                }
+                checkAndAdd(child)
             }
         }
 
-        // 1. Status icons container
-        val statusIcons = (findViewByClassName(root, "MiuiStatusIconContainer") as? ViewGroup)
-            ?: (findViewByClassName(root, "StatusIconContainer") as? ViewGroup)
-            ?: (root.resources?.getIdentifier("statusIcons", "id", PKG_SYSTEMUI)?.let { id -> if (id != 0) root.findViewById<ViewGroup>(id) else null })
-        inspectContainer(statusIcons)
+        // 1. Status icons container (WiFi, Signal, BT, Speed, HyperCeiler temp)
+        inspectContainer(findStatusIconsContainer(root))
 
         // 2. Battery container
-        val batteryContainer = (findViewByClassName(root, "MiuiStatusBatteryContainer") as? ViewGroup)
-            ?: (root.resources?.getIdentifier("battery", "id", PKG_SYSTEMUI)?.let { id -> if (id != 0) root.findViewById<ViewGroup>(id) else null })
-        inspectContainer(batteryContainer)
+        inspectContainer(findBatteryContainer(root))
 
-        // 3. Notification status container
-        val notifContainer = findViewByClassName(root, "MiuiNotificationStatusContainer") as? ViewGroup
-        inspectContainer(notifContainer)
-
-        // 4. Lockscreen area
+        // 3. Lockscreen status icon area
         val lockAreaId = root.resources?.getIdentifier("status_icon_area", "id", PKG_SYSTEMUI) ?: 0
         if (lockAreaId != 0) {
-            inspectContainer(root.findViewById<ViewGroup>(lockAreaId))
+            val lockArea = root.findViewById<ViewGroup>(lockAreaId)
+            inspectContainer(lockArea)
+            val sysIconsId = root.resources?.getIdentifier("system_icons", "id", PKG_SYSTEMUI) ?: 0
+            if (sysIconsId != 0) {
+                inspectContainer(root.findViewById<ViewGroup>(sysIconsId))
+            }
         }
 
         return icons
@@ -642,6 +646,7 @@ object StatusBarFpsHook {
         if (!isEnabled || currentPosition != "right") return
         if (fpsView.visibility != View.VISIBLE || fpsView.width <= 0 || !fpsView.isAttachedToWindow) return
         val root = fpsView.rootView ?: return
+        val parent = fpsView.parent as? View ?: return
         val screenWidth = root.width.takeIf { it > 0 } ?: fpsView.resources.displayMetrics.widthPixels
 
         val candidateIcons = collectCandidateIcons(root, screenWidth)
@@ -659,10 +664,9 @@ object StatusBarFpsHook {
 
         if (minIconX == null) return
 
-        val fpsLoc = IntArray(2)
-        fpsView.getLocationOnScreen(fpsLoc)
-        val curScreenX = fpsLoc[0]
-        val baseScreenX = curScreenX - fpsView.translationX
+        val parentLoc = IntArray(2)
+        parent.getLocationOnScreen(parentLoc)
+        val baseScreenX = parentLoc[0] + fpsView.left
 
         val density = fpsView.resources.displayMetrics.density
         val gapPx = (maxOf(statusBarMarginRight, 2) * density).toInt()
@@ -672,6 +676,7 @@ object StatusBarFpsHook {
 
         if (java.lang.Math.abs(fpsView.translationX - desiredTranslationX) > 0.5f) {
             fpsView.translationX = desiredTranslationX
+            Log.i(TAG, "DynamicAlign: icons=${candidateIcons.size}, minIconX=$minIconX, baseScreenX=$baseScreenX, targetLeft=$targetLeft, desiredTransX=$desiredTranslationX")
         }
     }
 
